@@ -1,0 +1,34 @@
+#!/bin/sh
+# 首次启动执行一次：系统标识、时区、LAN 地址、基础服务
+# 由 /etc/init.d/boot 在开机时执行，执行后自动删除
+
+uci -q set system.@system[0].hostname='7620A-Router' || true
+uci -q set system.@system[0].timezone='CST-8' || true
+uci -q set system.@system[0].zonename='Asia/Shanghai' || true
+uci -q set system.@system[0].conceal_ssid='0' || true
+uci -q set system.@system[0].conceal_bssid='0' || true
+
+# NTP 国内可用源
+uci -q set system.ntp.enabled='1' || true
+uci -q set system.ntp.enable_server='0' || true
+
+# LAN：默认 192.168.10.1/24，避开光猫常用的 192.168.1.1
+uci -q set network.lan.proto='static' || true
+uci -q set network.lan.ipaddr='192.168.10.1' || true
+uci -q set network.lan.netmask='255.255.255.0' || true
+uci -q set network.lan.ip6assign='60' || true
+
+# DHCP：地址池与网关同网段
+uci -q set dhcp.lan.start='100' || true
+uci -q set dhcp.lan.limit='150' || true
+uci -q set dhcp.lan.leasetime='12h' || true
+
+# 关闭可能干扰的默认服务
+uci -q set uhttpd.main.redirect_https='0' || true
+
+uci -q commit system || true
+uci -q commit network || true
+uci -q commit dhcp || true
+uci -q commit uhttpd || true
+
+exit 0
