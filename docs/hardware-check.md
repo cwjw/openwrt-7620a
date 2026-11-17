@@ -4,10 +4,24 @@
 
 - SoC **MT7620A**，单核 580MHz
 - Flash **MX25L12835F**（128Mbit = 16MB SPI-NOR）
-- 内存 **128MB** DDR2
+- 内存 **64MB** DDR2（板载 Winbond W9751G6KB-25，512Mb ×16；MT7620A 为 16bit 位宽，单颗即全部内存）
 - 无线 **仅 2.4G**（7620A 内置）
 - 网口 **1 WAN + 1 LAN**
 - 指示灯 **wifi / 4g / sys / link** 共 4 个，另有一个 reset 键、一个 SIM 卡槽
+
+## 0. 照片实拍核对（2026-11-17）
+
+| 照片信息 | 结论 |
+| --- | --- |
+| 丝印 `SL-IR4_V1.3` | 工业 4G 路由主板 V1.3 |
+| `MEDIATEK MT7620A` | SoC 确认，target `ramips/mt7620` |
+| `W9751G6KB-25`（Winbond） | **512Mb = 64MB** DDR2，单颗；MT7620A 是 16bit 位宽，单颗 512Mb 即为全部内存 → 实际 64MB，与此前"128MB"不符 |
+| 52pin mini-PCIe 槽（照片中为空）+ 背面 SIM 座 | 4G 走 mini-PCIe 模块（模块内部 USB 2.0） |
+| 两个 U.FL（CON1/CON2） | 2×2 2.4G，双天线 |
+| `ADM3202` + 4 针排针 / 绿色端子 | 板载 RS232 电平转换，console 很可能在此 |
+| 两个 RJ45，各带 `BT16B03` 变压器 | 1 WAN + 1 LAN 确认 |
+| 贴纸 `MAC ID: BC14EFE87559` | 基准 MAC `BC:14:EF:E8:75:59` |
+| **Flash 颗粒丝印** | 两张照片里未拍到 8 脚 SPI Flash 的清晰丝印 → **16MB / MX25L12835F 仍按你的说法，未经图像确认**，务必按第 1 节确认 |
 
 固件里的板级描述在 `dts/mt7620a_7620a_cpe-16m.dts`，其中 3 项是**推断值**，需要实测校准：
 
@@ -19,9 +33,11 @@
 
 ---
 
-## 1. 用 TTL 确认分区（最可靠）
+## 1. 用串口确认 Flash 容量与分区（最可靠）
 
-接线：3.3V USB-TTL，GND—GND，TX—RX，RX—TX，先不要接 3.3V（板子自己供电）。
+你这块板有 `ADM3202`（RS232 电平转换），所以**别默认它是 TTL**：绿色端子/4 针排针那一路如果是 RS232 电平，要用 USB-RS232 转接头；如果是直连 SoC UART 的排针，才是 3.3V TTL。拿不准就先万用表量排针空闲电平（3.3V 左右为 TTL，±5～12V 为 RS232），量不出来再两种转接头都备着。
+
+接线（TTL 情况）：3.3V USB-TTL，GND—GND，TX—RX，RX—TX，先不要接 3.3V（板子自己供电）。
 串口参数：`57600 8N1`（部分板子 `115200`），打开终端后给板子上电。
 
 U-Boot 启动倒计时里按任意键打断，然后：
@@ -30,6 +46,8 @@ U-Boot 启动倒计时里按任意键打断，然后：
 printenv                 # 重点看 bootcmd / bootargs / mtdparts
 flinfo                   # 或 fli，看 Flash 型号与分区列表
 ```
+
+**先在这里确认 Flash 容量**：`flinfo` 输出的芯片型号应为 `MX25L12835F`、容量 16MB。若实际是 8MB 或 32MB，`configs/mt7620a-16m.config` 里的 `IMAGE_SIZE := 16064k` 与 DTS 分区都要跟着改，**不要先刷**。
 
 - 若 `bootargs` 里出现 `mtdparts=...:0x30000@0x0(uboot),...0x10000@0x40000(factory),0xfb0000@0x50000(firmware)` → 与我们的 DTS 一致，可放心写
 - 若 firmware 起始偏移不是 `0x50000`（例如 `0x30000`，那是洪电 H8922 那类布局），**必须**把 DTS 里 `partition@50000` 的 `reg` 改成实测值，否则刷完找不到 rootfs
