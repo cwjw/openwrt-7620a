@@ -1,0 +1,44 @@
+#!/bin/sh /etc/rc.common
+# 统一无线默认参数：2.4G / 5G 分别命名，WPA2-PSK 加密
+# 只执行一次，用 /etc/.7620a-wifi-applied 打标
+
+START=95
+USE_PROCD=0
+
+start() {
+	[ -f /etc/.7620a-wifi-applied ] && return 0
+	[ -f /etc/config/wireless ] || return 0
+
+	# 所有射频开启，并固定常用信道
+	i=0
+	while uci -q get wireless.@wifi-device[$i] >/dev/null; do
+		uci -q set wireless.@wifi-device[$i].disabled='0'
+		uci -q set wireless.@wifi-device[$i].country='CN'
+		case "$i" in
+			0) uci -q set wireless.@wifi-device[$i].channel='6' ;;
+			1) uci -q set wireless.@wifi-device[$i].channel='149' ;;
+		esac
+		i=$((i + 1))
+	done
+
+	# 无线接口：0 号 2.4G，1 号 5G
+	i=0
+	while uci -q get wireless.@wifi-iface[$i] >/dev/null; do
+		uci -q set wireless.@wifi-iface[$i].disabled='0'
+		uci -q set wireless.@wifi-iface[$i].encryption='psk2+ccmp'
+		uci -q set wireless.@wifi-iface[$i].key='7620a@2026'
+		uci -q set wireless.@wifi-iface[$i].isolate='0'
+		case "$i" in
+			0) uci -q set wireless.@wifi-iface[$i].ssid='7620A-2.4G' ;;
+			1) uci -q set wireless.@wifi-iface[$i].ssid='7620A-5G' ;;
+			*) uci -q set wireless.@wifi-iface[$i].ssid="7620A-WiFi$i" ;;
+		esac
+		i=$((i + 1))
+	done
+
+	uci -q commit wireless
+	touch /etc/.7620a-wifi-applied
+	wifi reload >/dev/null 2>&1 || true
+}
+
+stop() { :; }
