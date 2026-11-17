@@ -1,0 +1,166 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+// 7620A 4G CPE 板级描述（16MB SPI-NOR / 128MB DDR2 / 1WAN+1LAN / 仅 2.4G / SIM 卡槽）
+// Flash: Macronix MX25L12835F (16MB)
+// 说明：
+//   - LED 与 reset 的 GPIO 号是按同类 7620A 4G 板（CPE102 / H8922）推断的，
+//     若某个灯不亮或按键位置不对，按 docs/hardware-check.md 的“GPIO 校准”小节修正后重编；
+//   - 分区表采用国产 7620A 板最常见的 16MB 布局：
+//       u-boot 0x00000-0x30000 / u-boot-env 0x30000-0x40000
+//       factory 0x40000-0x50000 / firmware 0x50000-0x1000000
+//     与原厂 web 升级时的写入偏移一致，刷机前请务必先用 TTL 核对（见 README 第 6 节）。
+
+/dts-v1/;
+
+#include "mt7620a.dtsi"
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
+
+/ {
+	compatible = "generic,7620a-cpe-16m", "ralink,mt7620a-soc";
+	model = "7620A 4G CPE (16MB, 1WAN + 1LAN)";
+
+	aliases {
+		led-boot = &led_sys;
+		led-failsafe = &led_sys;
+		led-running = &led_sys;
+		led-upgrade = &led_sys;
+	};
+
+	chosen {
+		bootargs = "console=ttyS0,115200";
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		led_sys: led-sys {
+			function = LED_FUNCTION_POWER;
+			color = <LED_COLOR_ID_GREEN>;
+			gpios = <&gpio1 2 GPIO_ACTIVE_LOW>;
+			default-state = "on";
+		};
+
+		led-wifi {
+			function = LED_FUNCTION_WLAN;
+			color = <LED_COLOR_ID_GREEN>;
+			gpios = <&gpio3 0 GPIO_ACTIVE_LOW>;
+			linux,default-trigger = "phy0tpt";
+		};
+
+		led-4g {
+			function = LED_FUNCTION_MOBILE;
+			color = <LED_COLOR_ID_GREEN>;
+			gpios = <&gpio1 14 GPIO_ACTIVE_LOW>;
+		};
+
+		led-link {
+			function = "link";
+			color = <LED_COLOR_ID_GREEN>;
+			gpios = <&gpio0 2 GPIO_ACTIVE_LOW>;
+		};
+	};
+
+	keys {
+		compatible = "gpio-keys";
+
+		reset {
+			label = "reset";
+			gpios = <&gpio0 1 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_RESTART>;
+		};
+	};
+};
+
+&gpio1 {
+	status = "okay";
+};
+
+&gpio3 {
+	status = "okay";
+};
+
+&spi0 {
+	status = "okay";
+
+	flash@0 {
+		compatible = "jedec,spi-nor";
+		reg = <0>;
+		spi-max-frequency = <50000000>;
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			partition@0 {
+				label = "u-boot";
+				reg = <0x0 0x30000>;
+				read-only;
+			};
+
+			partition@30000 {
+				label = "u-boot-env";
+				reg = <0x30000 0x10000>;
+				read-only;
+			};
+
+			partition@40000 {
+				label = "factory";
+				reg = <0x40000 0x10000>;
+				read-only;
+
+				nvmem-layout {
+					compatible = "fixed-layout";
+					#address-cells = <1>;
+					#size-cells = <1>;
+
+					eeprom_factory_0: eeprom@0 {
+						reg = <0x0 0x200>;
+					};
+
+					macaddr_factory_4: macaddr@4 {
+						reg = <0x4 0x6>;
+					};
+				};
+			};
+
+			partition@50000 {
+				compatible = "denx,uimage";
+				label = "firmware";
+				reg = <0x50000 0xfb0000>;
+			};
+		};
+	};
+};
+
+&ethernet {
+	nvmem-cells = <&macaddr_factory_4>;
+	nvmem-cell-names = "mac-address";
+	// w = WAN（port0），l = LAN（port1-4），板子只引出 port0/port1 两个口
+	mediatek,portmap = "wllll";
+};
+
+&wmac {
+	nvmem-cells = <&eeprom_factory_0>;
+	nvmem-cell-names = "eeprom";
+};
+
+&state_default {
+	default {
+		groups = "i2c", "spi refclk", "wled";
+		function = "gpio";
+	};
+};
+
+&pcie {
+	status = "okay";
+};
+
+&ehci {
+	status = "okay";
+};
+
+&ohci {
+	status = "okay";
+};
