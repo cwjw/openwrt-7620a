@@ -8,12 +8,25 @@
 | --- | --- | --- |
 | SoC | MediaTek **MT7620A**（单核 MIPS 24KEc 580MHz） | target `ramips/mt7620` |
 | Flash | **MX25L12835F**，128Mbit = **16MB** SPI-NOR | 分区表按 16MB 布局，`IMAGE_SIZE=16064k` |
-| 内存 | **128MB** DDR2 | 可带完整插件集 |
+| 内存 | **64MB** DDR2（板载 Winbond **W9751G6KB-25**，512Mb ×16 单颗） | 插件总量控制在 10 个左右 |
 | 无线 | **仅 2.4G**（7620A 内置，802.11n） | `kmod-rt2800-soc`，无 5G 相关包 |
 | 网口 | **1 WAN + 1 LAN** | `mediatek,portmap = "wllll"`（port0=WAN，port1=LAN） |
 | 指示灯 | 4 个：`wifi` / `4g` / `sys` / `link` | DTS 里 4 个 gpio-led |
 | 其它 | SIM 卡槽、reset 键 | reset → `KEY_RESTART`；4G 走 USB 模块 |
 | 引导 | 只有**原厂 web 升级**（暂无 Breed） | 刷机见第 6 节，务必先备份原厂 flash |
+
+### 实拍核对（按你发来的 PCB 照片）
+
+| 照片上看到的 | 结论 |
+| --- | --- |
+| PCB 丝印 `SL-IR4_V1.3` | 工业级 4G 路由主板，V1.3 版 |
+| SoC 丝印 `MEDIATEK MT7620A` | 与你说的一致，target 就是 `ramips/mt7620` |
+| 内存颗粒 `W9751G6KB-25`（Winbond） | **512Mb = 64MB**。MT7620A 是 16bit DDR2 位宽，单颗 512Mb 就是这台机器的全部内存，板子上也只有这一颗 → **实际 64MB，不是 128MB** |
+| 一个 52pin mini-PCIe 槽（空着）+ 背面 SIM 座 | 4G 不是焊在板上的基带，而是插 **mini-PCIe 模块**（模块内部走 USB 2.0）→ 固件要带 QMI/ECM 驱动，与第 3 节一致 |
+| 两个 U.FL 天线座（CON1/CON2） | 7620A 内置 2×2 2.4G，两根天线都接上才跑满 300M |
+| `ADM3202`（RS232 电平转换）+ 4 针排针 + 绿色接线端子 | 这块板有串口通道，原厂 U-Boot 的 console 大概率从这里出，**备份时优先试它**（见第 6.1） |
+| 两个 RJ45（各自带 `BT16B03` 网络变压器） | 1 WAN + 1 LAN 确认，且是独立变压器 → 两口都在 7620A 内置交换上，`mediatek,portmap` 有效 |
+| 贴纸 `MAC ID: BC14EFE87559` | 出厂基准 MAC = `BC:14:EF:E8:75:59`，刷好固件后可拿来核对 `eth0` 的 MAC 是否被正确读出 |
 
 ---
 
@@ -77,6 +90,7 @@ DTS 路径：`dts/mt7620a_7620a_cpe-16m.dts`。改完 push 或手动跑一次 wo
 
 **4G**
 - `uqmi` + `luci-proto-qmi`（QMI 模块，如 移远 EC20/EC25/EP06）
+- 你的机器是 **mini-PCIe 插模块**（照片里槽位是空的）：模块装上后走 USB 2.0，上面这些驱动正好覆盖；空槽时不装模块，4G 功能为空，`4g` 指示灯留作状态灯或按需关掉
 - `kmod-usb-net-cdc-ether`（ECM/RNDIS 类模块）
 - `kmod-usb-serial-option` + `usb-modeswitch`（PPP/串口类模块自动切换）
 - 插卡后：LuCI → 网络 → 接口 → 新建接口，协议选 `QMI`（或 `DHCP` 走 ECM），设备选 `/dev/cdc-wdm0` 或 `wwan0`，填 APN
@@ -148,7 +162,11 @@ git push -u origin main
 
 ### 6.1 第一步：先把原厂整片 flash 备份下来（必须）
 
-没有 Breed 时，唯一的保险是 **TTL 串口**（3.3V USB-TTL，板上找 3–4 针 UART，常见波特率 `57600` 或 `115200`，GND-TX-RX 交叉接）：
+没有 Breed 时，唯一的保险是**串口**。你这块板上有 `ADM3202`（RS232 电平转换），所以先说结论：
+
+- 板上那颗 `ADM3202` + 旁边的 4 针排针/绿色端子，大概率就是原厂 console 通道。若是 **RS232 电平**，用 USB-RS232 转接头；若排针直接接 SoC 的 UART，则是 3.3V TTL，用 USB-TTL（**别把 5V/RS232 电平直接怼到排针上**，先量电平或看丝印）
+- 常见波特率 `57600` 或 `115200`，GND 必接，TX/RX 交叉；不确定就先两种波特率都试
+- 板边的 `TES11` / `TES12` 测试点也可能是 UART，可作为备选
 
 1. 串口连上，上电，在启动倒计时里打断进入 U-Boot 命令行
 2. 记录关键信息：`printenv`（看 `bootcmd`、`mtdparts`、`bootargs`）、`flinfo`/`fli`（看 flash 型号与分区）
@@ -210,6 +228,7 @@ cat /tmp/hw.txt
 
 ## 8. 已知限制
 
+- **64MB 内存**：LuCI + Argon + mwan3 + nlbwmon 常驻约 30–35MB，够用但不宽裕，别再往上叠重型插件。
 - **7620A + 2.4G**：无线最高 802.11n 300Mbps（实际 100–150Mbps），没有 5G，也没有 802.11ac。
 - **路由性能**：单核 580MHz，NAT 转发约 300–600Mbps 小包；跑满千兆不现实，硬件加速补丁未启用。
 - **16MB Flash**：本配置约 6–7MB，还能再放 2–3 个中等插件；再加会撞 `check-size` 报错。
