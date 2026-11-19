@@ -1,0 +1,31 @@
+#!/bin/sh /etc/rc.common
+# 首启守护：把原厂 SeaOS 留下来的 jffs2 当成 overlay 挂上了，就一次性清掉
+# 背景：0xB10000 起 5MB 是原厂 jffs2（SeaOS 的 /etc/config），
+#       刷机后 fstools 会把它当 rootfs_data 挂载，于是 uhttpd 读的是原厂配置
+#       （里面写着 list interpreter ".php=/usr/bin/php-fcgi"），LuCI 打不开。
+# 本脚本只在 overlay 不是我们自己创建的时候擦除它，然后重启一次。
+
+START=10
+STOP=90
+
+start() {
+	# 我们的 uci-defaults 正常跑过就会留下这个标记
+	[ -f /etc/.7620a_applied ] && return 0
+
+	# 只在确认是原厂 SeaOS 残留时才动手，避免误删用户自己的配置
+	if ! grep -qs 'php-fcgi' /etc/config/uhttpd 2>/dev/null && \
+	   [ ! -f /etc/board ] && [ ! -f /etc/general_all_flow_count_table ]; then
+		return 0
+	fi
+
+	logger -t 7620a-guard "overlay 里发现原厂 SeaOS 残留，尝试擦除 rootfs_data"
+
+	if jffs2reset -y >/dev/null 2>&1; then
+		logger -t 7620a-guard "rootfs_data 已擦除，重启后重新生成配置"
+		sync
+		reboot -f
+	else
+		logger -t 7620a-guard \
+			"jffs2reset 失败：请用串口执行 sf erase 0xB10000 0x4F0000，或在 failsafe 下执行 firstboot -y"
+	fi
+}
