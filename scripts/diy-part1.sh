@@ -16,7 +16,7 @@ if ! grep -q 'Device/7620a_cpe-16m' "$MK"; then
 
 # ---------------------------------------------------------------------------
 # 自制板型：Sealan SL-IR4 / TX20
-# MT7620A + 16MB SPI-NOR(MX25L12835F) + 64MB DDR2 + 1WAN/1LAN + 仅 2.4G
+# MT7620A + 16MB SPI-NOR(MX25L12835F) + 128MB DDR2(W9751G6KB-25) + 1WAN/1LAN + 仅 2.4G
 # 固件区与原厂一致：0x50000 起，长 0xAC0000（11MB），U-Boot web 升级按整段覆盖
 # ---------------------------------------------------------------------------
 define Device/7620a_cpe-16m
@@ -38,6 +38,10 @@ endef
 TARGET_DEVICES += 7620a_cpe-16m
 EOF
 fi
+
+# 追加后自检：板型定义必须能被源码树解析到（否则 defconfig 里这个符号会消失）
+grep -q 'define Device/7620a_cpe-16m' "$MK" || { echo "!! mt7620.mk 追加失败"; exit 1; }
+grep -q 'TARGET_DEVICES += 7620a_cpe-16m' "$MK" || { echo "!! TARGET_DEVICES 未登记"; exit 1; }
 
 echo "==> feeds update"
 ./scripts/feeds update -a
