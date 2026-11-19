@@ -10,12 +10,12 @@
 //   网口：lan_port=0、wan_port=4（/etc/status/eth_led.sh）→ mediatek,portmap = "llllw"
 //   内存：W9751G6KB-25 单颗 128MB DDR2（W9751G6KB = 1Gb）
 //
-// 【指示灯映射：2026-11-20 在设备上用 /sys/class/leds/*/brightness 逐颗实测】
-//   GPIO30 → LINK 灯（实测确认，原厂 eth_led.sh 的 wan_lan_led_num = 30）
-//   GPIO31 → 4G 灯  （实测确认；此前误以为是 WIFI，已修正）
-//   GPIO32 → SYS 灯  （实测确认，原厂 /etc/init.d/led 的 status_led = 32）
-//   GPIO33 → 实测不驱动任何灯（原厂 ipsec 脚本里的 "sealed 33 on/off" 不是灯）
-//   WIFI 灯不在 30/31/32/33 上，改由 SoC 的硬件 WLED 脚（wled 功能）驱动。
+// 【指示灯：2026-11-20 在设备上用 /sys/class/leds/*/brightness 逐颗实测】
+//   GPIO30 → LINK 灯（原厂 eth_led.sh 的 wan_lan_led_num = 30 一致）
+//   GPIO31 → WIFI 灯（用户实机确认：驱动该引脚时正是期望的 wifi 指示）
+//   GPIO32 → SYS 灯 （原厂 /etc/init.d/led 的 status_led = 32 一致）
+//   GPIO33 → 实测不驱动任何灯（原厂 ipsec 脚本的 "sealed 33 on/off" 不是灯）
+//   4G 灯 → 引脚未定位（不在 30~33 上），暂不定义，不猜。
 //
 // 注意：rootfs_data 必须显式声明。原厂在 0xB10000 放了 SeaOS 的 jffs2，
 //       不声明的话 fstools 会自己去扩大 rootfs 并把这玩意当 overlay 挂上，
@@ -68,11 +68,12 @@
 			linux,default-trigger = "netdev";
 		};
 
-		/* GPIO31：实测 = 面板 4G */
-		led-4g {
-			label = "4g";
+		/* GPIO31：实测对该引脚操作即为期望的 wifi 指示 */
+		led-wifi: led-wifi {
+			function = LED_FUNCTION_WLAN;
+			color = <LED_COLOR_ID_GREEN>;
 			gpios = <&gpio1 7 GPIO_ACTIVE_LOW>;
-			default-state = "off";
+			linux,default-trigger = "phy0tpt";
 		};
 	};
 
@@ -95,20 +96,6 @@
 /* 板载 RS232（ADM3202）接在 UART0 上，原厂内核即 console=ttyS1,57600n8 */
 &uart {
 	status = "okay";
-};
-
-/* WIFI 灯：实测不在 GPIO30~33 上，改交给 SoC 的硬件 WLED 脚
- * （pinctrl 功能 "wled"，由 WMAC 自动按无线活动闪） */
-&wmac {
-	pinctrl-names = "default";
-	pinctrl-0 = <&wled_pins>;
-	nvmem-cells = <&eeprom_factory_0>;
-	nvmem-cell-names = "eeprom";
-
-	led {
-		led-sources = <0>;
-		led-active-low;
-	};
 };
 
 &spi0 {
@@ -178,15 +165,20 @@
 	mediatek,portmap = "llllw";
 };
 
+&wmac {
+	nvmem-cells = <&eeprom_factory_0>;
+	nvmem-cell-names = "eeprom";
+};
+
 /*
  * 只把确实被当作 GPIO 用的引脚组放开：
- * LED(30-32) 落在 rgmii1 复用区，reset(35) 与 link 灯同组；
- * i2c / wled 在本板上没有对应器件（wled 留给硬件 WIFI 灯，不再抢成 gpio）。
+ * LED(30-33) 落在 rgmii1 / wled 复用区，reset(35) 与 link 灯同组；
+ * i2c 在本板上没有对应器件。
  * 不放开 uartf —— 串口控制台要留在 UART0 上。
  */
 &state_default {
 	gpio {
-		groups = "i2c", "rgmii1", "rgmii2";
+		groups = "i2c", "wled", "rgmii1", "rgmii2";
 		function = "gpio";
 	};
 };
