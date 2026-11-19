@@ -18,6 +18,30 @@ uci -q set network.lan.ipaddr='192.168.10.1' || true
 uci -q set network.lan.netmask='255.255.255.0' || true
 uci -q set network.lan.ip6assign='60' || true
 
+# 网口兜底：/etc/board.d/02_network_sl-ir4 正常生效时这里什么都不做；
+# 万一 switch/VLAN 没生成（例如升级后 board.json 已存在），就地补一份，
+# 保证 port0=LAN(eth0.1)、port4=WAN(eth0.2) 一定存在，不会出现“刷完没网口”。
+if ! uci -q show network | grep -q 'network.@switch_vlan'; then
+	uci -q add network switch >/dev/null || true
+	uci -q set network.@switch[-1].name='switch0' || true
+	uci -q set network.@switch[-1].reset='1' || true
+	uci -q set network.@switch[-1].enable_vlan='1' || true
+
+	v1=$(uci -q add network switch_vlan) || true
+	uci -q set network.$v1.device='switch0' || true
+	uci -q set network.$v1.vlan='1' || true
+	uci -q set network.$v1.ports='0 1 2 3 6t' || true
+
+	v2=$(uci -q add network switch_vlan) || true
+	uci -q set network.$v2.device='switch0' || true
+	uci -q set network.$v2.vlan='2' || true
+	uci -q set network.$v2.ports='4 6t' || true
+fi
+
+[ -z "$(uci -q get network.lan.device)" ]  && uci -q set network.lan.device='eth0.1' || true
+[ -z "$(uci -q get network.wan.device)" ]  && uci -q set network.wan.device='eth0.2' || true
+[ -z "$(uci -q get network.wan.proto)" ]   && uci -q set network.wan.proto='dhcp' || true
+
 # DHCP：地址池与网关同网段
 uci -q set dhcp.lan.start='100' || true
 uci -q set dhcp.lan.limit='150' || true
