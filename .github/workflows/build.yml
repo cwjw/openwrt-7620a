@@ -48,14 +48,6 @@ jobs:
           sudo timedatectl set-timezone Asia/Shanghai || true
           echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
 
-      - name: 缓存下载目录
-        uses: actions/cache@v5
-        with:
-          path: openwrt/dl
-          key: dl-${{ env.REPO_BRANCH }}-${{ hashFiles('configs/*.config') }}
-          restore-keys: |
-            dl-${{ env.REPO_BRANCH }}-
-
       - name: 缓存 ccache
         uses: actions/cache@v5
         with:
@@ -66,8 +58,19 @@ jobs:
 
       - name: 克隆源码
         run: |
-          git clone --depth=1 -b "${{ env.REPO_BRANCH }}" "${{ env.REPO_URL }}" openwrt
+          # 注意：dl 缓存必须在克隆之后恢复。否则 actions/cache 会提前把 openwrt/ 建出来，
+          # git clone 直接报 "destination path 'openwrt' already exists"（exit 128）。
+          rm -rf openwrt
+          git clone --depth=1 --single-branch -b "${{ env.REPO_BRANCH }}" "${{ env.REPO_URL }}" openwrt
           cd openwrt && git log -1 --pretty=format:'源码版本: %h %s%n'
+
+      - name: 缓存下载目录（克隆之后再恢复）
+        uses: actions/cache@v5
+        with:
+          path: openwrt/dl
+          key: dl-${{ env.REPO_BRANCH }}-${{ hashFiles('configs/*.config') }}
+          restore-keys: |
+            dl-${{ env.REPO_BRANCH }}-
 
       - name: 加载 feeds 与种子配置（第一步）
         run: |
@@ -89,6 +92,8 @@ jobs:
           grep -E "CONFIG_TARGET_ramips_mt7620_DEVICE_" .config || (echo "未选中任何板型，终止" && exit 1)
           echo "=== 已选中的自定义包 ==="
           grep -E "CONFIG_PACKAGE_(luci|block-mount|ttyd|htop)=" .config | head -40
+          echo "=== board.d 网络脚本 ==="
+          ls -l files/etc/board.d/ 2>/dev/null || (echo "board.d 未注入，终止" && exit 1)
 
       - name: 下载源码包
         run: |
