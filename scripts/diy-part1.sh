@@ -6,7 +6,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT/openwrt"
 
-echo "==> 注入板级 DTS（7620A 4G CPE / 16MB）"
+echo "==> 注入板级 DTS（Sealan SL-IR4 / TX20）"
 cp -f "$ROOT/dts/mt7620a_7620a_cpe-16m.dts" target/linux/ramips/dts/
 
 echo "==> 追加镜像定义到 ramips/mt7620"
@@ -15,18 +15,23 @@ if ! grep -q 'Device/7620a_cpe-16m' "$MK"; then
   cat >> "$MK" <<'EOF'
 
 # ---------------------------------------------------------------------------
-# 自制板型：MT7620A + 16MB SPI-NOR( MX25L12835F ) + 128MB DDR2
-# 1 WAN + 1 LAN，仅 2.4G，SIM 卡槽（外挂 USB 4G 模块）
+# 自制板型：Sealan SL-IR4 / TX20
+# MT7620A + 16MB SPI-NOR(MX25L12835F) + 64MB DDR2 + 1WAN/1LAN + 仅 2.4G
+# 固件区与原厂一致：0x50000 起，长 0xAC0000（11MB），U-Boot web 升级按整段覆盖
 # ---------------------------------------------------------------------------
 define Device/7620a_cpe-16m
 	SOC := mt7620a
 	DEVICE_DTS := mt7620a_7620a_cpe-16m
-	DEVICE_VENDOR := Generic
-	DEVICE_MODEL := 7620A 4G CPE
-	DEVICE_VARIANT := 16M
-	IMAGE_SIZE := 16064k
+	DEVICE_VENDOR := Sealan
+	DEVICE_MODEL := SL-IR4
+	DEVICE_VARIANT := TX20
+	IMAGE_SIZE := 11264k
+	IMAGES += factory.bin
+	# 原厂 U-Boot 的 web 升级会校验镜像尺寸，这里 pad 到 0xAC0000(11534336) 整段
+	IMAGE/factory.bin := append-kernel | append-rootfs | pad-rootfs | \
+		pad-to 11534336 | check-size
 	DEVICE_PACKAGES := kmod-rt2800-soc kmod-usb2 kmod-usb-ohci \
-		kmod-usb-net-qmi-wwan kmod-usb-net-cdc-ether \
+		kmod-usb-net-qmi-wwan kmod-usb-net-cdc-ether kmod-usb-net-cdc-mbim \
 		kmod-usb-serial-option usb-modeswitch uqmi luci-proto-qmi
 	SUPPORTED_DEVICES += generic,7620a-cpe-16m
 endef
