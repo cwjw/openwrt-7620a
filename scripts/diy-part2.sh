@@ -10,11 +10,19 @@ rm -rf files
 mkdir -p files
 cp -a "$ROOT/files/." files/
 find files -type f -name "*.sh" -exec chmod +x {} \;
-chmod +x files/etc/uci-defaults/* files/etc/init.d/* files/etc/board.d/* 2>/dev/null || true
+chmod +x files/etc/uci-defaults/* files/etc/init.d/* files/etc/board.d/* \
+	files/lib/preinit/* 2>/dev/null || true
 
 echo "==> 校验 board.d 网络脚本已注入（上游 mt7620 的 02_network 无默认分支，必须自带）"
 ls -l files/etc/board.d/
 grep -q 'ucidef_add_switch' files/etc/board.d/02_network_sl-ir4
+
+echo "==> 校验首启 overlay 守护脚本已注入"
+ls -l files/lib/preinit/
+grep -q 'boot_hook_add preinit_main' files/lib/preinit/82_7620a_overlay_guard
+
+# 862：preinit 钩子按文件名排序，82 必须排在 80_mount_root 之后
+test "$(basename files/lib/preinit/82_7620a_overlay_guard)" \> "80_mount_root" || exit 1
 
 echo "==> 注册开机自启（7620a-wifi）"
 mkdir -p files/etc/rc.d
@@ -23,12 +31,12 @@ ln -sf ../init.d/7620a-wifi files/etc/rc.d/S957620a-wifi
 echo "==> 设置默认 LuCI 主题为 argon（若已编译该主题）"
 if grep -q 'CONFIG_PACKAGE_luci-theme-argon=y' .config; then
   mkdir -p files/etc/uci-defaults
-  cat > files/etc/uci-defaults/98-theme-argon <<'EOF'
+  cat > files/etc/uci-defaults/98-theme-argon <<'EOFT'
 #!/bin/sh
 uci -q set luci.main.mediaurlbase='/luci-static/argon' || true
 uci -q commit luci || true
 exit 0
-EOF
+EOFT
   chmod +x files/etc/uci-defaults/98-theme-argon
 fi
 

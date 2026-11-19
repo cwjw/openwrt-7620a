@@ -1,0 +1,36 @@
+#!/bin/sh
+# 82_7620a_overlay_guard：首启时清掉原厂 SeaOS 留在 0xB10000 的 jffs2
+#
+# 背景：原厂把可写分区（SeaOS 的 /etc/config）放在 0xB10000，刷了我们的镜像后，
+# fstools 会把这段旧 jffs2 直接当 rootfs_data 挂载（OpenWrt 默认保留配置的行为），
+# 于是 /etc/config/uhttpd 用的还是原厂那份：
+#   list interpreter ".php=/usr/bin/php-fcgi"
+# 新固件里没有 php-fcgi，浏览器打开就报：
+#   Unable to launch the requested CGI program: /usr/bin/php-fcgi: No such file or directory
+#
+# 这里在 overlay 挂载后、uci-defaults 执行前检查一次：
+#   只有确认是原厂残留（没有我们的标记且看得到 SeaOS 特征文件）才擦除并重启。
+# 干净首启 / 正常升级都不会误伤。
+
+check_foreign_overlay() {
+	[ "$FAILSAFE" = "true" ] && return 0
+	[ -f /etc/.7620a_applied ] && return 0
+
+	if ! grep -qs 'php-fcgi' /etc/config/uhttpd 2>/dev/null && \
+	   [ ! -f /etc/board ] && [ ! -f /etc/general_all_flow_count_table ]; then
+		return 0
+	fi
+
+	echo "- 7620a: 发现原厂 SeaOS 遗留 overlay，擦除 rootfs_data 后重启 -"
+	logger -t 7620a-guard "overlay ㏒ 原厂 SeaOS 残留 → 擦除 rootfs_data"
+
+	if jffs2reset -y >/dev/null 2>&1; then
+		logger -t 7620a-guard "rootfs_data 已擦除，重启后重新生成配置"
+		sync
+		reboot -f
+	fi
+
+	logger -t 7620a-guard "jffs2reset 失败：请串口执行 sf erase 0xB10000 0x4F0000"
+}
+
+boot_hook_add preinit_main check_foreign_overlay

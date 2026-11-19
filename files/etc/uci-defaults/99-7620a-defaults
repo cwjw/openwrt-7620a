@@ -2,6 +2,10 @@
 # 首次启动执行一次：系统标识、时区、LAN 地址、基础服务
 # 由 /etc/init.d/boot 在开机时执行，执行后自动删除
 
+# 标记：本 overlay 是本固件自己创建的（供 lib/preinit/82_7620a_overlay_guard 判断，
+# 避免把原厂 SeaOS 留下的 jffs2 当配置继续用）
+touch /etc/.7620a_applied
+
 uci -q set system.@system[0].hostname='7620A-Router' || true
 uci -q set system.@system[0].timezone='CST-8' || true
 uci -q set system.@system[0].zonename='Asia/Shanghai' || true
