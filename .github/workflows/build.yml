@@ -19,6 +19,8 @@ env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt
   REPO_BRANCH: ${{ github.event.inputs.branch || 'openwrt-24.10' }}
   TZ: Asia/Shanghai
+  DEVICE_ID: 7620a_cpe-16m
+  FACTORY_SIZE: '11534336'
 
 jobs:
   build:
@@ -58,8 +60,8 @@ jobs:
 
       - name: 克隆源码
         run: |
-          # 注意：dl 缓存必须在克隆之后恢复。否则 actions/cache 会提前把 openwrt/ 建出来，
-          # git clone 直接报 "destination path 'openwrt' already exists"（exit 128）。
+          # 注意：dl 缓存必须在克隆之后恢复，否则 actions/cache 会提前创建 openwrt/
+          # 目录，git clone 会以 "destination path 'openwrt' already exists" 失败（exit 128）。
           rm -rf openwrt
           git clone --depth=1 --single-branch -b "${{ env.REPO_BRANCH }}" "${{ env.REPO_URL }}" openwrt
           cd openwrt && git log -1 --pretty=format:'源码版本: %h %s%n'
@@ -78,7 +80,30 @@ jobs:
           cp ../configs/mt7620a-16m.config .config
           if [ -f ../feeds.conf ]; then cp ../feeds.conf feeds.conf; fi
           bash ../scripts/diy-part1.sh
-          make defconfig
+          make defconfig 2>&1 | tee /tmp/defconfig.log
+
+          # 上游 "Target Profile" 是 kconfig choice，一个构建只能选一个板型。
+          # 种子配置里若出现两条 CONFIG_TARGET_<target>_DEVICE_*=y，后一条会覆盖前一条，
+          # defconfig 会打印 "warning: override: ... changes choice state"，
+          # 结果就是自建板型被静默丢掉（Run #4 只出 evb 产物的根因）。
+          if grep -q 'changes choice state' /tmp/defconfig.log; then
+            echo "::error::种子配置里有多个板型 =y，kconfig choice 互相覆盖"
+            grep 'changes choice state' /tmp/defconfig.log || true
+            exit 1
+          fi
+
+          if ! grep -qx "CONFIG_TARGET_ramips_mt7620_DEVICE_${DEVICE_ID}=y" .config; then
+            echo "::error::自建板型 ${DEVICE_ID} 没有被选中，构建会产出别人的固件"
+            grep -E 'CONFIG_TARGET_ramips_mt7620_DEVICE_.*=y' .config || true
+            exit 1
+          fi
+
+          if ! grep -qx 'CONFIG_TARGET_ROOTFS_SQUASHFS=y' .config; then
+            echo "::error::CONFIG_TARGET_ROOTFS_SQUASHFS 未生效，只会产出 initramfs-kernel"
+            exit 1
+          fi
+
+          echo "==> 板型与 rootfs 类型校验通过"
 
       - name: 注入自定义内容（第二步）
         run: |
@@ -88,12 +113,27 @@ jobs:
       - name: 校验目标与板型
         run: |
           cd openwrt
-          echo "=== 已选中的板型 ==="
-          grep -E "CONFIG_TARGET_ramips_mt7620_DEVICE_" .config || (echo "未选中任何板型，终止" && exit 1)
-          echo "=== 已选中的自定义包 ==="
-          grep -E "CONFIG_PACKAGE_(luci|block-mount|ttyd|htop)=" .config | head -40
+          echo "=== 目标 / 子目标 / 板型 ==="
+          grep -E '^CONFIG_TARGET_(ramips|ramips_mt7620|ramips_mt7620_DEVICE_)=' .config
+          echo "=== 镜像类型 ==="
+          grep -E '^CONFIG_TARGET_(ROOTFS_SQUASHFS|IMAGES_GZIP|MULTI_PROFILE)=' .config || true
+
+          echo "=== 板级定义是否真的进了源码树 ==="
+          grep -q "define Device/${DEVICE_ID}" target/linux/ramips/image/mt7620.mk \
+            || { echo "::error::mt7620.mk 缺少 Device/${DEVICE_ID}"; exit 1; }
+          grep -n "TARGET_DEVICES += ${DEVICE_ID}" target/linux/ramips/image/mt7620.mk \
+            || { echo "::error::mt7620.mk 缺少 TARGET_DEVICES += ${DEVICE_ID}"; exit 1; }
+          ls -l "target/linux/ramips/dts/mt7620a_${DEVICE_ID}.dts" \
+            || { echo "::error::板级 DTS 未注入源码树"; exit 1; }
+
           echo "=== board.d 网络脚本 ==="
-          ls -l files/etc/board.d/ 2>/dev/null || (echo "board.d 未注入，终止" && exit 1)
+          ls -l files/etc/board.d/ || { echo "::error::board.d 未注入"; exit 1; }
+          grep -q 'ucidef_add_switch' files/etc/board.d/02_network_sl-ir4 \
+            || { echo "::error::02_network_sl-ir4 缺少交换机定义"; exit 1; }
+
+          echo "=== 关键包（LuCI / 4G / 交换机）==="
+          grep -E "CONFIG_PACKAGE_(luci|ttyd|htop|uqmi|usb-modeswitch)=" .config | head -20
+          grep -E "CONFIG_PACKAGE_(kmod-usb-net-qmi-wwan|kmod-usb-serial-option|swconfig|kmod-rt2800-soc)=" .config
 
       - name: 下载源码包
         run: |
@@ -103,7 +143,36 @@ jobs:
       - name: 编译固件
         run: |
           cd openwrt
+          # 必须开 pipefail，否则 `make | tee` 会把 make 的失败吞掉，
+          # 表现为“构建成功但产物不全”（Run #4 就是这样被掩盖的）。
+          set -o pipefail
           make -j$(nproc) 2>&1 | tee build.log
+
+      - name: 核对产物（尺寸不符直接失败）
+        if: success()
+        run: |
+          cd openwrt
+          ls -l bin/targets/ramips/mt7620/ || true
+          echo "=== 镜像尺寸告警 ==="
+          grep -i 'is too big' build.log || echo "无尺寸告警"
+
+          FACTORY=$(ls bin/targets/ramips/mt7620/*"${DEVICE_ID}"-squashfs-factory.bin 2>/dev/null | head -1)
+          if [ -z "$FACTORY" ]; then
+            echo "::error::未生成 ${DEVICE_ID}-squashfs-factory.bin"
+            exit 1
+          fi
+          SZ=$(stat -c %s "$FACTORY")
+          echo "factory.bin = $FACTORY ($SZ bytes)"
+          if [ "$SZ" != "${FACTORY_SIZE}" ]; then
+            echo "::error::factory.bin 尺寸 $SZ ≠ ${FACTORY_SIZE}，原厂 web 升级会拒收"
+            exit 1
+          fi
+
+          SYSUP=$(ls bin/targets/ramips/mt7620/*"${DEVICE_ID}"-squashfs-sysupgrade.bin 2>/dev/null | head -1)
+          if [ -z "$SYSUP" ]; then
+            echo "::error::未生成 ${DEVICE_ID}-squashfs-sysupgrade.bin"
+            exit 1
+          fi
 
       - name: 收集固件
         if: success()
@@ -143,5 +212,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: build-log-${{ github.run_number }}
-          path: openwrt/build.log
+          path: |
+            openwrt/build.log
+            /tmp/defconfig.log
           if-no-files-found: ignore
