@@ -66,9 +66,6 @@ if ! uci -q get system.led_7620a_link >/dev/null 2>&1; then
 	uci -q set system.$r.default='0' || true
 fi
 
-# SYS 灯（GPIO32）：常亮，DTS 里已是 default-on，这里再兜一层
-u -q set system.led_7620a_sys=led 2>/dev/null || true
-
 # 关闭可能干扰的默认服务
 uci -q set uhttpd.main.redirect_https='0' || true
 
