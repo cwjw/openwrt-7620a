@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later OR MIT
-// 板级描述：Sealan SL-IR4 / TX20（MT7620A + 16MB SPI-NOR + 64MB DDR2）
+// 板级描述：Sealan SL-IR4 / TX20（MT7620A + 16MB SPI-NOR + 128MB DDR2）
 // 1 LAN + 1 WAN，仅 2.4G，4 颗指示灯（link / wifi / sys / 4g），SIM 卡槽，1 个 reset 键
 //
 // 全部参数来自原厂 16MB 整片备份 D:\router\tx20-boot.bin 的逆向结果：
@@ -10,7 +10,7 @@
 //   网口：lan_port=0、wan_port=4（/etc/status/eth_led.sh）→ mediatek,portmap = "llllw"
 //   指示灯：link=GPIO30(netdev) sys=GPIO32 /etc/init.d/led status_led、wifi=GPIO31、4G=GPIO33
 //   按键：btnd reset 35 → GPIO35
-//   内存：W9751G6KB-25 单颗 64MB
+//   内存：W9751G6KB-25 单颗 128MB DDR2
 //
 // 注意：firmware 分区只到 0xB10000（与原厂固件区完全一致），
 //       不把 0xB10000 之后的原厂 jffs2 划进任何分区，避免开机把 SeaOS 的旧配置当 overlay 挂载。
@@ -51,8 +51,6 @@
 		/* GPIO30：原厂 eth_led.sh 的 wan_lan_led_num = 30（link 灯） */
 		led-link {
 			label = "link";
-			function = "link";
-			color = <LED_COLOR_ID_GREEN>;
 			gpios = <&gpio1 6 GPIO_ACTIVE_LOW>;
 			linux,default-trigger = "netdev";
 		};
@@ -68,8 +66,6 @@
 		/* GPIO33：原厂 ipsec/vpn 脚本用 "sealed 33 on/off" 点灯，即 4G/上网状态灯 */
 		led-4g {
 			label = "4g";
-			function = LED_FUNCTION_MOBILE;
-			color = <LED_COLOR_ID_GREEN>;
 			gpios = <&gpio1 9 GPIO_ACTIVE_LOW>;
 		};
 	};
