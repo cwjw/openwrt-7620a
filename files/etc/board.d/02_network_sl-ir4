@@ -1,0 +1,43 @@
+#!/bin/sh
+# Sealan SL-IR4 / TX20（MT7620A + 16MB）专用网络初始化
+#
+# 上游 target/linux/ramips/mt7620/base-files/etc/board.d/02_network 的
+# ramips_setup_interfaces() 是按 board_name 枚举的 case 列表，末尾没有 *) 兜底分支。
+# 本板 compatible = "generic,7620a-cpe-16m"，不命中任何 case，该函数什么也不做，
+# 于是首次启动不会生成 switch / switch_vlan，eth0.1（lan）与 eth0.2（wan）
+# 根本不存在 —— 表现为：系统起得来，但没有 IP、LuCI 打不开、网口不通。
+#
+# 这里补一份本板专用的 board.d，roles 与原厂一致：
+#   port0..3 = LAN，port4 = WAN，port6 = CPU（eth0）
+# 由 /bin/config_generate 转成：
+#   config switch_vlan  vid=1 ports="0 1 2 3 6t" -> eth0.1 -> lan
+#   config switch_vlan  vid=2 ports="4 6t"       -> eth0.2 -> wan
+#   config interface lan device eth0.1 / wan device eth0.2
+
+. /lib/functions.sh
+. /lib/functions/uci-defaults.sh
+. /lib/functions/system.sh
+
+sl_ir4_setup_interfaces() {
+	ucidef_add_switch "switch0" \
+		"0:lan" "1:lan" "2:lan" "3:lan" "4:wan" "6@eth0"
+}
+
+sl_ir4_setup_macs() {
+	local lan_mac wan_mac
+
+	# factory 区 0x4 起为本机 MAC（原厂 dump 为 BC:14:EF:E8:75:44）
+	lan_mac=$(mtd_get_mac_binary factory 0x4)
+	if [ -n "$lan_mac" ]; then
+		ucidef_set_interface_macaddr "lan" "$lan_mac"
+		wan_mac=$(macaddr_add "$lan_mac" 1)
+		ucidef_set_interface_macaddr "wan" "$wan_mac"
+	fi
+}
+
+board_config_update
+sl_ir4_setup_interfaces
+sl_ir4_setup_macs
+board_config_flush
+
+exit 0
