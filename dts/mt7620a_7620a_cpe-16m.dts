@@ -1,26 +1,27 @@
 // SPDX-License-Identifier: GPL-2.0-or-later OR MIT
-// 板级描述：Sealan SL-IR4 / TX20（MT7620A + 16MB SPI-NOR + 128MB DDR2）
+// 板级描述：Sealan SL-IR4 / TX20（MT7620A + 16MB SPI-NOR，DDR2）
 // 1 LAN + 1 WAN，仅 2.4G，4 颗指示灯（上排 WIFI/4G，下排 SYS/LINK），SIM 卡槽，1 个 reset 键
 //
-// 全部参数来自原厂 16MB 整片备份 D:\router\tx20-boot.bin 的逆向结果 + 设备实测：
+// 【重要：内存刻意不声明 memory 节点】
+// 撤掉 memory@0 = <0x0 0x8000000>（128MB）的原因：
+//   原厂 SeaOS 自己报 MemTotal 64MB，说明 U-Boot 的 DDR 初始化只配了 64MB；
+//   内核按 DTB 拿 128MB 去用会採到未初始化的高部地址，实测一刷就起不来。
+//   不写 memory 节点时沿用目标默认 64MB（之前稳定启动的那版就是这个配置）。
+//   将来实测确认 DDR 真是 128MB 且 U-Boot 已初始化，再把节点加回来。
+//
+// 【rootfs_data 也不再手动声明】
+// 之前的版本声明了 partition@b10000（0xB10000 +0x4F0000），与内核 squashfs-split
+// 自动生成的同名分区存在冲突风险（双 rootfs_data）。现在交给 mtdsplit 自切，
+// 这是已经验证能正常启动的配置。原厂 jffs2 仍留在 0xB10000，由 82_7620a_overlay_guard 清理/忽略。
+//
+// 实测确认的板级参数（来自原厂 16MB 备份 D:\router\tx20-boot.bin + 设备实测）：
 //   分区：u-boot 0x00000 +0x30000 / u-boot-env 0x30000 +0x10000 / factory 0x40000 +0x10000
 //         firmware 0x50000 +0xAC0000（原厂 squashfs 数据止于 0xB0E004）
-//         rootfs_data 0xB10000 +0x4F0000（原厂 jffs2 所在的尾巴，交给 OpenWrt 当 overlay）
 //   内核 cmdline：console=ttyS1,57600n8 root=/dev/mtdblock5
 //   网口：lan_port=0、wan_port=4（/etc/status/eth_led.sh）→ mediatek,portmap = "llllw"
-//   内存：W9751G6KB-25 单颗 128MB DDR2（W9751G6KB = 1Gb）
-//
-// 【指示灯：2026-11-20 在设备上用 /sys/class/leds/*/brightness 逐颗实测】
-//   GPIO30 → LINK 灯（原厂 eth_led.sh 的 wan_lan_led_num = 30 一致）
-//   GPIO31 → WIFI 灯（用户实机确认：驱动该引脚时正是期望的 wifi 指示）
-//   GPIO32 → SYS 灯 （原厂 /etc/init.d/led 的 status_led = 32 一致）
-//   GPIO33 → 实测不驱动任何灯（原厂 ipsec 脚本的 "sealed 33 on/off" 不是灯）
-//   4G 灯 → 引脚未定位（不在 30~33 上），暂不定义，不猜。
-//
-// 注意：rootfs_data 必须显式声明。原厂在 0xB10000 放了 SeaOS 的 jffs2，
-//       不声明的话 fstools 会自己去扩大 rootfs 并把这玩意当 overlay 挂上，
-//       导致 /etc/config 全是原厂那套（uhttpd 去找 /usr/bin/php-fcgi）。
-//       声明后能按名字擦除，并由 7620a-overlay-guard 在首启时自动清掉。
+//   灯：GPIO30 = LINK、GPIO32 = SYS、GPIO31 = WIFI（实测），GPIO33 实测无灯
+//       （4G 灯引脚未定位，不猜、不定义）
+//   按键：btnd reset 35 → GPIO35
 
 /dts-v1/;
 
@@ -44,12 +45,6 @@
 		bootargs = "console=ttyS1,57600n8";
 	};
 
-	/* MT7620A DDR2 基址 0x0，W9751G6KB-25 为 1Gb=128MB */
-	memory@0 {
-		device_type = "memory";
-		reg = <0x0 0x8000000>;
-	};
-
 	leds {
 		compatible = "gpio-leds";
 
@@ -68,7 +63,7 @@
 			linux,default-trigger = "netdev";
 		};
 
-		/* GPIO31：实测对该引脚操作即为期望的 wifi 指示 */
+		/* GPIO31：实测该引脚即为期望的 wifi 指示 */
 		led-wifi: led-wifi {
 			function = LED_FUNCTION_WLAN;
 			color = <LED_COLOR_ID_GREEN>;
@@ -148,12 +143,6 @@
 				label = "firmware";
 				reg = <0x50000 0xac0000>;
 			};
-
-			/* 原厂 jffs2 所在区：显式声明成 rootfs_data，供 overlay 使用 */
-			partition@b10000 {
-				label = "rootfs_data";
-				reg = <0xb10000 0x4f0000>;
-			};
 		};
 	};
 };
@@ -172,7 +161,7 @@
 
 /*
  * 只把确实被当作 GPIO 用的引脚组放开：
- * LED(30-33) 落在 rgmii1 / wled 复用区，reset(35) 与 link 灯同组；
+ * LED(30-32) 落在 rgmii1 / wled 复用区，reset(35) 与 link 灯同组；
  * i2c 在本板上没有对应器件。
  * 不放开 uartf —— 串口控制台要留在 UART0 上。
  */
@@ -196,10 +185,11 @@
 };
 
 /*
- * 关闭 SoC 硬件看门狗（rt2880_wdt）：
- * 本板上 procd 打开 /dev/watchdog 后无法稳定喂狗，运行 1~2 分钟即被硬复位；
- * 解绑驱动后现场仍复位，说明计数器一旦启用就停不下来。
- * 关掉后内核不再注册 /dev/watchdog，procd 的软件看门狗（procd - watchdog -）照常工作。
+ * 关闭 SoC 硬件看门狗（rt2880_wdt）。
+ * 依据：本板上内核打开 /dev/watchdog 后无法稳定喂狗，1~2 分钟即被硬复位；
+ * 解绑驱动后现场仍复位（计数器残值仍在跑），需要从驱动层就不注册。
+ * 对照：原厂 rc.local 里有 `watchdog -T /dev/watchdog -s 5`（用户态每 5s 喂狗），
+ * 说明硬件狗本身是好的，问题在“谁在喂”。本版先关掉，用于隔离验证。
  */
 &watchdog {
 	status = "disabled";
