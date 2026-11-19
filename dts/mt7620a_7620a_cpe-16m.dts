@@ -10,7 +10,7 @@
 //   网口：lan_port=0、wan_port=4（/etc/status/eth_led.sh）→ mediatek,portmap = "llllw"
 //   指示灯：link=GPIO30(netdev) sys=GPIO32 /etc/init.d/led status_led、wifi=GPIO31、4G=GPIO33
 //   按键：btnd reset 35 → GPIO35
-//   内存：W9751G6KB-25 单颗 128MB DDR2
+//   内存：W9751G6KB-25 单颗 128MB DDR2（W9751G6KB = 1Gb）
 //
 // 注意：rootfs_data 必须显式声明。原厂在 0xB10000 放了 SeaOS 的 jffs2，
 //       不声明的话 fstools 会自己去扩大 rootfs 并把这玩意当 overlay 挂上，
@@ -37,6 +37,12 @@
 
 	chosen {
 		bootargs = "console=ttyS1,57600n8";
+	};
+
+	/* MT7620A DDR2 基址 0x0，W9751G6KB-25 为 1Gb=128MB */
+	memory@0 {
+		device_type = "memory";
+		reg = <0x0 0x8000000>;
 	};
 
 	leds {
@@ -188,4 +194,14 @@
 
 &ohci {
 	status = "okay";
+};
+
+/*
+ * 关闭 SoC 硬件看门狗（rt2880_wdt）：
+ * 本板上 procd 打开 /dev/watchdog 后无法稳定喂狗，运行 1~2 分钟即被硬复位；
+ * 解绑驱动后现场仍复位，说明计数器一旦启用就停不下来。
+ * 关掉后内核不再注册 /dev/watchdog，procd 的软件看门狗（procd - watchdog -）照常工作。
+ */
+&watchdog {
+	status = "disabled";
 };
