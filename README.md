@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | SoC | MT7620A（MIPS 24KEc 580MHz） | DTS 目标 `ramips/mt7620` |
 | Flash | 16MB SPI-NOR（MX25L12835F） | 备份文件正好 16,777,216 字节 |
-| 内存 | **64MB**（W9751G6KB-25 单颗） | 板上只有一颗 512Mb 颗粒 |
+| 内存 | **128MB**（W9751G6KB-25 单颗 1Gb DDR2） | 板上只有一颗，W9751G6KB = 1Gbit |
 | 引导 | U-Boot `SeaOS boot (Dec 19 2016)`，板名 `SL-IR1` | `0x0` 起 192KB |
 | 串口控制台 | **ttyS1（UART0）+ 57600 8N1**，经 ADM3202 转 RS232 | 原厂内核 cmdline：`console=ttyS1,57600n8 root=/dev/mtdblock5` |
 | 分区 | 见下表 | 备份逐段解析 + squashfs 明文 |
@@ -56,11 +56,52 @@
 
 ---
 
-## 3. 工程结构
+## 3. Run #4 为什么“成功却只出一个 evb 文件”（已修）
+
+2026-11-19 的 Run #4 显示 `completed successfully`、52m31s，但产物只有三个：`immortalwrt-ramips-mt7620-**ralink_mt7620a-evb**-initramfs-kernel.bin`、`sha256sums`、`SHA256SUMS.txt`。构建日志定位到两个叠加的问题：
+
+**（1）板型被后一行覆盖（决定性）**：上游的 “Target Profile” 是 **kconfig `choice`**，一个构建只能选**一个**设备。种子配置里写了两行：
+
+```
+CONFIG_TARGET_ramips_mt7620_DEVICE_7620a_cpe-16m=y
+CONFIG_TARGET_ramips_mt7620_DEVICE_ralink_mt7620a-evb=y     ← 后写的这条把前一条顶掉
+```
+
+`make defconfig` 实际打印了 `warning: override: ... changes choice state`，最终 `.config` 里只剩：
+
+```
+CONFIG_TARGET_ramips_mt7620_DEVICE_ralink_mt7620a-evb=y
+# CONFIG_TARGET_ramips_mt7620_DEVICE_7620a_cpe-16m is not set
+```
+
+所以真正被编译的是参考板 evb，自建板型一枚镜像都没出（板型定义本身是好的：`.config` 里能看到它的符号，只是没被选中）。**修复：种子配置只留自建板型一行。”先编个 evb 兜底“这个想法在 kconfig choice 下不成立。**
+
+**（2）evb 的 sysupgrade 超过它的分区上限，被丢弃**：
+
+```
+WARNING: ... ralink_mt7620a-evb-squashfs-sysupgrade.bin is too big: 8716292 > 8060928
+```
+
+evb 的 `IMAGE_SIZE` 只有 7936k（7,872,512），而塞了 LuCI+uqmi 等包后根文件系统涨到 8.7MB，镜像被跳过，最后只剩 initramfs-kernel 一个。这条只是 **warning**，不影响 job 结论，所以页面依然显示 success。
+
+**（3）失败被掩盖**：`make -j$(nproc) 2>&1 | tee build.log` 没开 `pipefail`，`tee` 的返回码覆盖了 make 的返回码，编译真出错也会被当成成功。
+
+已加入的硬校验（任一不满足直接 `exit 1`，不再出“看着成功、其实错版”的产物）：
+
+- `make defconfig` 日志里出现 `changes choice state` → 直接失败
+- `.config` 里必须 **精确** 有 `CONFIG_TARGET_ramips_mt7620_DEVICE_7620a_cpe-16m=y`
+- `CONFIG_TARGET_ROOTFS_SQUASHFS=y` 必须在（否则只会出 initramfs）
+- `mt7620.mk` 里必须有 `define Device/7620a_cpe-16m`、`TARGET_DEVICES += 7620a_cpe-16m`；DTS 必须已在 `target/linux/ramips/dts/`
+- 编译步骤开 `set -o pipefail`
+- 产物验收：`*7620a_cpe-16m-squashfs-factory.bin` 必须存在且 **正好 11534336 字节**，`*-squashfs-sysupgrade.bin` 必须存在；同时把 `is too big` 告警打到日志里
+
+---
+
+## 4. 工程结构
 
 ```
 openwrt-7620a/
-├── .github/workflows/build.yml           # 云编译流水线
+├── .github/workflows/build.yml           # 云编译流水线（含上述硬校验）
 ├── configs/mt7620a-16m.config            # 种子配置（平台/板型/插件）
 ├── dts/mt7620a_7620a_cpe-16m.dts         # 板级描述（含分区/GPIO/portmap）
 ├── scripts/
@@ -90,17 +131,17 @@ IMAGE/factory.bin := append-kernel | append-rootfs | pad-rootfs | pad-to 1153433
 
 ---
 
-## 4. 云编译
+## 5. 云编译
 
 仓库 → **Actions** → `Build MT7620A Firmware` → **Run workflow**（branch 填 `openwrt-24.10`，tag 留空）。
 
-产物（Artifacts → `mt7620a-firmware-<run号>`，文件名以页面实际显示为准，认后缀就行）：
+产物（Artifacts → `mt7620a-firmware-<run号>`）：
 
 | 文件 | 用途 |
 | --- | --- |
-| `*-squashfs-factory.bin` | **首次刷机就用它**，大小必须是 11,534,336 字节 |
-| `*-squashfs-sysupgrade.bin` | 已经跑起 OpenWrt 之后升级用 |
-| `*-initramfs-kernel.bin` | 只在内存里跑，验证板级参数用（不写 flash） |
+| `immortalwrt-ramips-mt7620-**7620a_cpe-16m**-squashfs-factory.bin` | **首次刷机就用它**，必须是 11,534,336 字节 |
+| `...-7620a_cpe-16m-squashfs-sysupgrade.bin` | 已经跑起 OpenWrt 之后升级用 |
+| `...-7620a_cpe-16m-initramfs-kernel.bin` | 只在内存里跑，验证板级参数用（不写 flash） |
 | `SHA256SUMS.txt` | 校验 |
 
 首次约 70–120 分钟，之后走 ccache/dl 缓存约 25–40 分钟。
@@ -113,11 +154,11 @@ Get-Item .\*factory.bin | Select-Object Name, Length   # Length 必须是 115343
 
 ---
 
-## 5. 刷机
+## 6. 刷机
 
 > 前提：你已经持有整片备份 `D:\router\tx20-boot.bin`（变砖可救回）。刷之前再复制一份到别处。
 
-### 5.1 首选：原厂 web 升级
+### 6.1 首选：原厂 web 升级
 
 1. 电脑接 **LAN 口**（原厂 port0，即交换口上那个能拿到 `192.168.10.x` 的口）
 2. 浏览器打开 `http://192.168.10.1`，账号 `admin`
@@ -127,7 +168,7 @@ Get-Item .\*factory.bin | Select-Object Name, Length   # Length 必须是 115343
 
 若页面报 `## Error: wrong file size, should be: N bytes!`，把 **N** 告我（N 就是它认的固件区字节数），我按 N 重设 `pad-to` 再编一次即可，其他都不用动。
 
-### 5.2 备选：串口 + U-Boot
+### 6.2 备选：串口 + U-Boot
 
 - 串口参数 **57600 8N1**（不是 115200），4 针排针经 ADM3202 出 RS232 电平
 - 上电后 `bootdelay=5` 内按任意键进 U-Boot（SeaOS 版，命令集与通用 U-Boot 一致）
@@ -147,20 +188,20 @@ tftpboot 0x81000000 ...factory.bin
 sf write 0x81000000 0x50000 0x$(filesize)
 ```
 
-### 5.3 变砖
+### 6.3 变砖
 
-- 串口有输出但起不来 → 按 5.2 重新擦 `0x50000 0xAC0000` 再写
+- 串口有输出但起不来 → 按 6.2 重新擦 `0x50000 0xAC0000` 再写
 - 串口无输出 → CH341A 编程器 + SOP8 夹子，把 `tx20-boot.bin` 整片写回
 
 **永远不要动 `0x0~0x4FFFF`**（u-boot + env + factory/ART），无线校准和 MAC 都在里面。
 
 ---
 
-## 6. 刷好后 30 秒自检
+## 7. 刷好后30 秒自检
 
 ```sh
 cat /proc/mtd                  # 应看到 u-boot/u-boot-env/factory/firmware/rootfs/rootfs_data
-free -m                        # Total 约 60MB
+free -m                        # Total 约 120MB
 ip -br link                    # 应有 eth0.1（LAN）与 eth0.2（WAN）
 cat /sys/class/net/eth0/address # BC:14:EF:E8:75:44
 iwinfo                         # 2.4G 射频存在，国家 CN
@@ -173,9 +214,9 @@ iwinfo                         # 2.4G 射频存在，国家 CN
 
 ---
 
-## 7. 已知限制
+## 8. 已知限制
 
-- **64MB 内存**：LuCI + Argon + mwan3 + nlbwmon 常驻约 30–35MB，够用但不宽裕
+- **128MB 内存**：LuCI + Argon + mwan3 + nlbwmon 常驻完全够用
 - **只有 2.4G**：802.11n 300Mbps 理论上限，实测 100–150Mbps
 - **overlay 约 3.4MB**：firmware 区 11MB 减去镜像约 7.6MB；`0xB10000` 那 5MB 原厂 jffs2 暂不回收（回收要在 U-Boot 里 `sf erase 0xB10000 0x4F0000` 后改 DTS 分区表，属于二期）
 - **NAT 性能**：单核 580MHz，约 300–600Mbps（小包更低），硬件加速未启用
