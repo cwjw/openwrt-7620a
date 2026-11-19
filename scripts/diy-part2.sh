@@ -10,7 +10,11 @@ rm -rf files
 mkdir -p files
 cp -a "$ROOT/files/." files/
 find files -type f -name "*.sh" -exec chmod +x {} \;
-chmod +x files/etc/uci-defaults/* files/etc/init.d/* 2>/dev/null || true
+chmod +x files/etc/uci-defaults/* files/etc/init.d/* files/etc/board.d/* 2>/dev/null || true
+
+echo "==> 校验 board.d 网络脚本已注入（上游 mt7620 的 02_network 无默认分支，必须自带）"
+ls -l files/etc/board.d/
+grep -q 'ucidef_add_switch' files/etc/board.d/02_network_sl-ir4
 
 echo "==> 注册开机自启（7620a-wifi）"
 mkdir -p files/etc/rc.d
