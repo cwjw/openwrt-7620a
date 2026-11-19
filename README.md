@@ -1,46 +1,70 @@
-# MT7620A 4G CPE 定制 OpenWrt 固件 · GitHub 云编译
+# SL-IR4 / TX20（MT7620A）定制 OpenWrt 固件 · GitHub 云编译
 
-针对你这台板子单独做的适配：**本地写板级描述与默认参数，编译交给 GitHub Actions**。
+本地只做板级适配（DTS、分区、镜像规则、默认配置），编译交给 GitHub Actions。
 
-## 已确认硬件
-
-| 项目 | 实测/确认值 | 对应固件处理 |
-| --- | --- | --- |
-| SoC | MediaTek **MT7620A**（单核 MIPS 24KEc 580MHz） | target `ramips/mt7620` |
-| Flash | **MX25L12835F**，128Mbit = **16MB** SPI-NOR | 分区表按 16MB 布局，`IMAGE_SIZE=16064k` |
-| 内存 | **64MB** DDR2（板载 Winbond **W9751G6KB-25**，512Mb ×16 单颗） | 插件总量控制在 10 个左右 |
-| 无线 | **仅 2.4G**（7620A 内置，802.11n） | `kmod-rt2800-soc`，无 5G 相关包 |
-| 网口 | **1 WAN + 1 LAN** | `mediatek,portmap = "wllll"`（port0=WAN，port1=LAN） |
-| 指示灯 | 4 个：`wifi` / `4g` / `sys` / `link` | DTS 里 4 个 gpio-led |
-| 其它 | SIM 卡槽、reset 键 | reset → `KEY_RESTART`；4G 走 USB 模块 |
-| 引导 | 只有**原厂 web 升级**（暂无 Breed） | 刷机见第 6 节，务必先备份原厂 flash |
-
-### 实拍核对（按你发来的 PCB 照片）
-
-| 照片上看到的 | 结论 |
-| --- | --- |
-| PCB 丝印 `SL-IR4_V1.3` | 工业级 4G 路由主板，V1.3 版 |
-| SoC 丝印 `MEDIATEK MT7620A` | 与你说的一致，target 就是 `ramips/mt7620` |
-| 内存颗粒 `W9751G6KB-25`（Winbond） | **512Mb = 64MB**。MT7620A 是 16bit DDR2 位宽，单颗 512Mb 就是这台机器的全部内存，板子上也只有这一颗 → **实际 64MB，不是 128MB** |
-| 一个 52pin mini-PCIe 槽（空着）+ 背面 SIM 座 | 4G 不是焊在板上的基带，而是插 **mini-PCIe 模块**（模块内部走 USB 2.0）→ 固件要带 QMI/ECM 驱动，与第 3 节一致 |
-| 两个 U.FL 天线座（CON1/CON2） | 7620A 内置 2×2 2.4G，两根天线都接上才跑满 300M |
-| `ADM3202`（RS232 电平转换）+ 4 针排针 + 绿色接线端子 | 这块板有串口通道，原厂 U-Boot 的 console 大概率从这里出，**备份时优先试它**（见第 6.1） |
-| 两个 RJ45（各自带 `BT16B03` 网络变压器） | 1 WAN + 1 LAN 确认，且是独立变压器 → 两口都在 7620A 内置交换上，`mediatek,portmap` 有效 |
-| 贴纸 `MAC ID: BC14EFE87559` | 出厂基准 MAC = `BC:14:EF:E8:75:59`，刷好固件后可拿来核对 `eth0` 的 MAC 是否被正确读出 |
+**这一版的所有参数都是从你提供的原厂整片备份 `D:\router\tx20-boot.bin` 逆向出来的，不是猜的。**
 
 ---
 
-## 1. 本项目做了什么
+## 1. 板子真实参数（逆向自原厂 16MB 备份）
+
+| 项目 | 原厂实测值 | 依据 |
+| --- | --- | --- |
+| SoC | MT7620A（MIPS 24KEc 580MHz） | DTS 目标 `ramips/mt7620` |
+| Flash | 16MB SPI-NOR（MX25L12835F） | 备份文件正好 16,777,216 字节 |
+| 内存 | **64MB**（W9751G6KB-25 单颗） | 板上只有一颗 512Mb 颗粒 |
+| 引导 | U-Boot `SeaOS boot (Dec 19 2016)`，板名 `SL-IR1` | `0x0` 起 192KB |
+| 串口控制台 | **ttyS1（UART0）+ 57600 8N1**，经 ADM3202 转 RS232 | 原厂内核 cmdline：`console=ttyS1,57600n8 root=/dev/mtdblock5` |
+| 分区 | 见下表 | 备份逐段解析 + squashfs 明文 |
+| 网口 | **port0 = LAN，port4 = WAN** | 原厂 `/etc/status/eth_led.sh`：`lan_port=0`、`wan_port=4` |
+| 指示灯 | sys=GPIO32、link=GPIO30、wifi=GPIO31、4g=GPIO33 | `/etc/init.d/led` 的 `status_led=32`、`eth_led.sh` 的 `wan_lan_led_num=30`、vpn 脚本的 `sealed 33 on/off` |
+| reset 键 | **GPIO35**（低有效） | 原厂 `btnd reset 35` |
+| MAC | `BC:14:EF:E8:75:44`（贴纸印 `…E87559`） | factory 分区 `0x40004` |
+| 原厂系统 | SeaOS（OpenWrt 派生），型号 `SL-IR4`，Web 名 `TX20`，LAN `192.168.10.1` | `/etc/board` |
+
+### 分区（与原厂完全一致）
+
+| 偏移 | 长度 | 内容 |
+| --- | --- | --- |
+| `0x00000` | `0x30000` | u-boot（只读，不动） |
+| `0x30000` | `0x10000` | u-boot-env（全 `0xFF`，CRC 无效 → U-Boot 用编译默认值，别指望它） |
+| `0x40000` | `0x10000` | factory / ART（MAC + 2.4G 校准，只读） |
+| `0x50000` | `0xAC0000` | **firmware**（内核 + squashfs，共 11,534,336 字节） |
+| `0xB10000` | `0x4F0000` | 原厂 jffs2（SeaOS 配置卷）—— **新版固件不划进任何分区** |
+
+> 原厂 squashfs 数据止于 `0xB0E004`，内核 uImage 在 `0x50000`（LZMA 压缩，load 0x80000000），与 OpenWrt 的 `uImage lzma` 完全同构，所以 U-Boot 能直接引导。
+
+---
+
+## 2. 上一版为什么刷了不能用（逐条对上了）
+
+| # | 上一版写法 | 原厂实际值 | 后果 |
+| --- | --- | --- | --- |
+| 1 | `console=ttyS0,115200`、未启用 `&uart` | `ttyS1,57600n8`（UART0） | 串口完全无输出，出错也看不见；`ttyS0` 是 uartlite，板上没引出 |
+| 2 | `mediatek,portmap = "wllll"` | `"llllw"`（port0=LAN、port4=WAN） | WAN/LAN 全反，插哪个口都拿不到地址 |
+| 3 | LED `gpio1 2 / gpio3 0 / gpio1 14 / gpio0 2`，reset `gpio0 1` | 30 / 31 / 32 / 33 + 35 | 灯全不亮，reset 长按不进恢复模式 |
+| 4 | `firmware 0x50000 + 0xFB0000`（盖到整片尾） | `+0xAC0000` | 开机把原厂 SeaOS 的 jffs2 当 overlay 挂上，`/etc/config` 全是旧板子的 `eth0.5`、老无线配置 → 能启动但网络/无线全乱 |
+| 5 | `IMAGE_SIZE := 16064k`，只有 `sysupgrade.bin` | 固件区 11MB，U-Boot web 升级按尺寸校验 | 上传被拒，或写进去后尾部对不上 |
+| 6 | `state_default` 只放开 `i2c / spi refclk / wled` | LED 引脚（GPIO30-33）在 `rgmii1` 复用区 | GPIO 拿不到引脚控制权，灯永远不亮 |
+| 7 | 板型名 `Generic 7620A 4G CPE` | 原厂 `SL-IR4` / 市售名 `TX20` | 只影响显示与 sysupgrade 机型校验提示 |
+
+> 顺带核实掉一个常见误解：**mt7620a 平台的 DTS 都不写 `memory` 节点**（我核了同分支全部 100+ 个 mt7620a 设备树和 274 个 mt7621 设备树，无一例外），内存由 U-Boot 的 ATAGS 上报。所以“缺 memory 节点”不是问题，手动加节点反而可能和平台逻辑打架，新版不加。
+
+新版把上面 7 项全部改正，并额外做了三件事：给固件区尾部留出干净 overlay 空间、把 factory 分区里的 MAC/校准表接进 `nvmem`、为原厂 web 升级产出**定长 11,534,336 字节**的 factory 镜像。
+
+---
+
+## 3. 工程结构
 
 ```
 openwrt-7620a/
 ├── .github/workflows/build.yml           # 云编译流水线
 ├── configs/mt7620a-16m.config            # 种子配置（平台/板型/插件）
-├── dts/mt7620a_7620a_cpe-16m.dts         # ★ 这台板子的板级描述（自行编写）
+├── dts/mt7620a_7620a_cpe-16m.dts         # ★ 板级描述（含分区/GPIO/portmap）
 ├── scripts/
 │   ├── diy-part1.sh                      # 注入 DTS + 镜像定义、feeds、裁剪
 │   ├── diy-part2.sh                      # 注入 files/、注册自启、写固件标识
-│   └── detect-hardware.sh                # 刷好 OpenWrt 后复核硬件
+│   └── detect-hardware.sh                # 刷好后复核硬件
 ├── files/
 │   ├── etc/banner
 │   ├── etc/uci-defaults/99-7620a-defaults    # 主机名/时区/LAN 192.168.10.1/DHCP
@@ -48,189 +72,109 @@ openwrt-7620a/
 └── docs/hardware-check.md                # 硬件与 GPIO 校准手册
 ```
 
-关键点：**没有现成 profile 完全匹配"1WAN+1LAN + 仅 2.4G + SIM"**，所以这里走的是自建板型路线 —— 在 `target/linux/ramips/dts/` 放一份自己的 DTS，并往 `image/mt7620.mk` 追加 `Device/7620a_cpe-16m`，由 `diy-part1.sh` 自动完成，上游源码保持干净。
-
-板型定义（由脚本追加，等价于写进 `mt7620.mk`）：
+板型定义（由 `diy-part1.sh` 追加进 `target/linux/ramips/image/mt7620.mk`）：
 
 ```
-SOC := mt7620a        IMAGE_SIZE := 16064k
+SOC := mt7620a
 DEVICE_DTS := mt7620a_7620a_cpe-16m
-DEVICE_PACKAGES := kmod-rt2800-soc kmod-usb2 kmod-usb-ohci \
-  kmod-usb-net-qmi-wwan kmod-usb-net-cdc-ether kmod-usb-serial-option \
-  usb-modeswitch uqmi luci-proto-qmi
+IMAGE_SIZE := 11264k                      # = 0xAC0000，与原厂固件区一致
+IMAGES += factory.bin
+IMAGE/factory.bin := append-kernel | append-rootfs | pad-rootfs | pad-to 11534336 | check-size
 ```
 
----
-
-## 2. 板级描述里三处需要实测校准的地方
-
-DTS 是按同类 7620A 4G 板推断写的，**能保证开机、能保证 2.4G 出信号**，但下面 3 项是推断值，实测不符再改一行重编即可：
-
-| 项目 | 当前取值（推断） | 现象不对时怎么查 |
-| --- | --- | --- |
-| 分区偏移 | `u-boot 0x0-0x30000 / env 0x30000 / factory 0x40000 / firmware 0x50000` | TTL 进 U-Boot 看 `printenv`、`flinfo`；或用编程器读出整片 dump 看偏移 |
-| LED GPIO | `sys=gpio1 2`、`wifi=gpio3 0`、`4g=gpio1 14`、`link=gpio0 2` | 系统起来后 `cat /sys/kernel/debug/gpio`，逐个数拉高拉低看哪个灯亮 |
-| reset GPIO | `gpio0 1`（低有效） | `cat /sys/kernel/debug/gpio` 按一下键看哪个值翻转，改 `keys/reset` 的 `gpios` |
-
-DTS 路径：`dts/mt7620a_7620a_cpe-16m.dts`。改完 push 或手动跑一次 workflow 就重编。
-`docs/hardware-check.md` 第 3 节有完整校准步骤。
-
----
-
-## 3. 固件预置内容
-
-**系统**
-- 主机名 `7620A-Router`，时区 `Asia/Shanghai`
-- LAN `192.168.10.1/24`（避开光猫常用的 192.168.1.1）
-- DHCP `192.168.10.100-249`，租期 12h，`ip6assign 60`
-
-**无线（仅 2.4G）**
-- SSID `7620A-2.4G`，信道 6，国家 CN
-- WPA2-PSK(AES)，初始口令 `7620a@2026`
-
-**4G**
-- `uqmi` + `luci-proto-qmi`（QMI 模块，如 移远 EC20/EC25/EP06）
-- 你的机器是 **mini-PCIe 插模块**（照片里槽位是空的）：模块装上后走 USB 2.0，上面这些驱动正好覆盖；空槽时不装模块，4G 功能为空，`4g` 指示灯留作状态灯或按需关掉
-- `kmod-usb-net-cdc-ether`（ECM/RNDIS 类模块）
-- `kmod-usb-serial-option` + `usb-modeswitch`（PPP/串口类模块自动切换）
-- 插卡后：LuCI → 网络 → 接口 → 新建接口，协议选 `QMI`（或 `DHCP` 走 ECM），设备选 `/dev/cdc-wdm0` 或 `wwan0`，填 APN
-
-**界面与运维**
-- 中文 `zh_Hans`、Argon 主题、`ttyd` 网页终端
-- UPnP、DDNS、WOL、多拨（mwan3）、流量统计（nlbwmon）
-- `curl` / `htop` / `nano` / `dropbear`
-
-**未预置**：科学上网类插件（体积与规则维护成本高）。要加就在 `configs/mt7620a-16m.config` 里加 `CONFIG_PACKAGE_luci-app-xxx=y`，并在 `diy-part1.sh` 加对应 feed。
+- `sysupgrade.bin`：以后在 OpenWrt 里升级用（不要求定长）
+- `factory.bin`：**首次从原厂 U-Boot / 原厂 web 页刷写用**，pad 到正好 11,534,336 字节，覆盖 `0x50000 ~ 0xB0FFFF` 整段（尾部补 `0xFF`，顺手把原厂残留擦干净）
 
 ---
 
 ## 4. 云编译
 
-### 4.0 已经替你验证过的部分
+仓库 → **Actions** → `Build MT7620A Firmware` → **Run workflow**（branch 填 `openwrt-24.10`，tag 留空）。
 
-在 Linux 上克隆了 `immortalwrt/immortalwrt@openwrt-24.10`，把 `dts/` 与镜像块按 `diy-part1.sh` 的方式注入后跑了 `make defconfig`：
+产物（Artifacts → `mt7620a-firmware-<run号>`）：
 
-- `CONFIG_TARGET_ramips_mt7620_DEVICE_7620a_cpe-16m=y` 被构建系统正确识别 → **镜像块写法、设备名、config 符号都没问题**
-- `CONFIG_TARGET_ramips_mt7620_DEVICE_ralink_mt7620a-evb=y` 兜底板型同时在列
-- `IMAGE_SIZE 16064k` 与 DTS 里 `firmware` 分区 `0x50000 + 0xfb0000 = 0x1000000` 精确对齐，不会触发 `check-size`
-- DTS 引用的 `gpio0~gpio3 / spi0 / ethernet / wmac / state_default / pcie / ehci / ohci` 标签，以及 `LED_FUNCTION_MOBILE`、`LED_FUNCTION_WLAN`、`LED_COLOR_ID_GREEN` 宏，都在该分支源码里存在
+| 文件 | 用途 |
+| --- | --- |
+| `...-7620a_cpe-16m-squashfs-**factory**.bin` | **首次刷机就用它**，大小必须是 11,534,336 字节 |
+| `...-7620a_cpe-16m-squashfs-sysupgrade.bin` | 已经跑起 OpenWrt 之后升级用 |
+| `...-7620a_cpe-16m-initramfs-kernel.bin` | 只在内存里跑，验证板级参数用（不写 flash） |
+| `...-ralink_mt7620a-evb-...bin` | 最简参考板兜底 |
+| `SHA256SUMS.txt` | 校验 |
 
-**没有做**：完整编译与 dtc 编译（本地没有 Linux 构建机，完整编译要一小时级）。DTS 结构是照着同平台可正常编译的 `mt7620a_zbtlink_zbt-cpe102.dts` 改的，若真有语法漏项，第一次云编译会停在 image 阶段并直接指出 `mt7620a_7620a_cpe-16m.dts:行号`，按行号补一个分号/括号即可，不会浪费整轮编译。
+首次约 70–120 分钟，之后走 ccache/dl 缓存约 25–40 分钟。
 
-### 4.1 把工程放进仓库
-
-两种方式，任选其一：
-
-**A. 由助手代推**：仓库建好后把仓库名（或 `https://github.com/<用户名>/<仓库名>`）发出来，助手通过 GitHub 授权接口把 10 个文件直接写到 `main`。
-
-**B. 自己在本地推**（仓库需先建好，建议 public、不要勾选初始化 README）：
+**拿到固件先本地核对尺寸**（PowerShell）：
 
 ```powershell
-cd E:\router\openwrt-7620a
-git init -b main
-git add .
-git commit -m "feat: MT7620A 4G CPE 16M 板级适配"
-git remote add origin https://github.com/<你的用户名>/<仓库名>.git
-git push -u origin main
+Get-Item .\*factory.bin | Select-Object Name, Length   # Length 必须是 11534336
 ```
 
-仓库 → **Actions** → `Build MT7620A Firmware` → **Run workflow**：
+---
 
-- `branch`：`openwrt-24.10`
-- `tag`：留空只出 Artifact；填 `v1.0` 则成功后自动发 Release
+## 5. 刷机
 
-首次约 70–120 分钟（含工具链），之后走 ccache + `dl` 缓存，约 25–40 分钟。
-产物：Artifacts → `mt7620a-firmware-<run号>`，其中
-- `immortalwrt-...-7620a_cpe-16m-squashfs-sysupgrade.bin` — **刷这个**
-- `...-initramfs-kernel.bin` — 内存运行/救砖验证
-- `...-ralink_mt7620a-evb-...bin` — 最简参考板兜底
-- `SHA256SUMS.txt`
+> 前提：你已经持有整片备份 `D:\router\tx20-boot.bin`（变砖可救回）。刷之前再复制一份到别处。
+
+### 5.1 首选：原厂 web 升级
+
+1. 电脑接 **LAN 口**（原厂 port0，即交换口上那个能拿到 `192.168.10.x` 的口）
+2. 浏览器打开 `http://192.168.10.1`，账号 `admin`
+3. 系统 → 升级 / Upgrade → 类型选 `firmware` → 选 `...-factory.bin`
+4. 上传后设备自动重启（3–6 分钟），**中途断电会变砖**
+5. 起来后访问 `http://192.168.10.1`（新固件 LAN 地址与原厂相同），`root`，密码空
+
+若页面报 `## Error: wrong file size, should be: N bytes!`，把 **N** 告我（N 就是它认的固件区字节数），我按 N 重设 `pad-to` 再编一次即可，其他都不用动。
+
+### 5.2 备选：串口 + U-Boot
+
+- 串口参数 **57600 8N1**（不是 115200），4 针排针经 ADM3202 出 RS232 电平
+- 上电后 `bootdelay=5` 内按任意键进 U-Boot（SeaOS 版，命令集与通用 U-Boot 一致）
+- 只在内存验证（零风险）：
+
+```
+tftpboot 0x81000000 ...initramfs-kernel.bin
+bootm 0x81000000
+```
+
+- 确认能进系统再写 flash（与 DTS 分区严格一致）：
+
+```
+sf probe 0
+sf erase 0x50000 0xAC0000
+tftpboot 0x81000000 ...factory.bin
+sf write 0x81000000 0x50000 0x$(filesize)
+```
+
+### 5.3 变砖
+
+- 串口有输出但起不来 → 按 5.2 重新擦 `0x50000 0xAC0000` 再写
+- 串口无输出 → CH341A 编程器 + SOP8 夹子，把 `tx20-boot.bin` 整片写回
+
+**永远不要动 `0x0~0x4FFFF`**（u-boot + env + factory/ART），无线校准和 MAC 都在里面。
 
 ---
 
-## 5. 默认登录
-
-- `http://192.168.10.1`，`root`，密码空（首登 LuCI 强制设置）
-- 无线 `7620A-2.4G`，口令 `7620a@2026`
-- 刷完请立刻改口令（初始口令明文写在 `files/etc/init.d/7620a-wifi`）
-
----
-
-## 6. 刷机（只有原厂 web，没有 Breed）
-
-**这一步是整件事风险最高的地方**：固件本身能编出来，但"能不能安全写进去"取决于原厂 U-Boot 的校验逻辑和分区偏移。按顺序做，别跳步。
-
-### 6.1 第一步：先把原厂整片 flash 备份下来（必须）
-
-没有 Breed 时，唯一的保险是**串口**。你这块板上有 `ADM3202`（RS232 电平转换），所以先说结论：
-
-- 板上那颗 `ADM3202` + 旁边的 4 针排针/绿色端子，大概率就是原厂 console 通道。若是 **RS232 电平**，用 USB-RS232 转接头；若排针直接接 SoC 的 UART，则是 3.3V TTL，用 USB-TTL（**别把 5V/RS232 电平直接怼到排针上**，先量电平或看丝印）
-- 常见波特率 `57600` 或 `115200`，GND 必接，TX/RX 交叉；不确定就先两种波特率都试
-- 板边的 `TES11` / `TES12` 测试点也可能是 UART，可作为备选
-
-1. 串口连上，上电，在启动倒计时里打断进入 U-Boot 命令行
-2. 记录关键信息：`printenv`（看 `bootcmd`、`mtdparts`、`bootargs`）、`flinfo`/`fli`（看 flash 型号与分区）
-3. 备份：U-Boot 支持 `md`/`sf read` 的板子可用
-   ```
-   sf probe 0
-   sf read 0x80000000 0 0x1000000      # 读 16MB 到内存
-   md.b 0x80000000 0x1000             # 串口回显（慢）
-   ```
-   更好的办法是通过 U-Boot 的 `tftpput` 或 `loady`/`loadx` 反向上传，把整片 dump 保存到电脑
-4. 这份 dump 就是你的变砖恢复盘，务必保存两份
-
-> 没有 TTL 条件时，至少先在原厂 web 里找"固件备份/配置备份"功能导出；但配置备份**不是**整片镜像，救不了砖。
-
-### 6.2 第二步：先试原厂 web 升级（成功率高但不保证）
-
-多数 MT7620A 4G CPE 的原厂固件本身就是 OpenWrt 派生，web 升级页接受未签名 `.bin`：
-
-1. 原厂后台 → 系统/升级 → 选 `...-7620a_cpe-16m-squashfs-sysupgrade.bin`
-2. 升级过程中**不要断电**（4–6 分钟），完成后设备会自动重启到 `192.168.10.1`
-3. 起不来就断电重启再试一次；连续两次起不来 → 走 6.3
-
-如果原厂页面提示"固件校验失败/非法固件"，说明有签名或机型校验，直接跳 6.3，不要反复试。
-
-### 6.3 第三步：TTL + U-Boot 刷入（推荐路径）
-
-1. U-Boot 下用 tftp 把镜像载入内存验证：
-   ```
-   tftpboot 0x81000000 7620a_cpe-16m-initramfs-kernel.bin
-   bootm 0x81000000
-   ```
-   initramfs 只在内存跑，能进系统说明**内核、DTS、串口、分区表都对**，这一步不写 flash，零风险
-2. 确认无误后写 flash（偏移按 6.1 实测的分区来）：
-   ```
-   sf probe 0
-   sf erase 0x50000 0xfb0000        # 与 DTS 里 firmware 分区一致
-   tftpboot 0x81000000 7620a_cpe-16m-squashfs-sysupgrade.bin
-   sf write 0x81000000 0x50000 0x$(filesize)
-   ```
-3. 想在以后都省事，可以在 U-Boot 里把 **Breed** 写到 `0x0`（16MB 的 MT7620A 通用 Breed），之后一切刷机都在 Breed 网页里做；写之前先把原厂 u-boot 用 `sf read` 备份出来
-
-### 6.4 变砖了怎么办
-
-- 现象：上电无串口输出、网口不亮 → 需要 **CH341A 编程器 + SOP8 夹子**，把 6.1 的 dump 写回 MX25L12835F
-- 现象：串口有 U-Boot 但起不来系统 → 重新 `sf erase 0x50000 0xfb0000` 后刷入 sysupgrade
-- 现象：能起系统但 LAN/WAN 反了 → 改 DTS 的 `mediatek,portmap`（试 `"llw"`、`"lwlll"` 等排列）重编重刷
-
----
-
-## 7. 刷好后复核硬件
+## 6. 刷好后 30 秒自检
 
 ```sh
-sh scripts/detect-hardware.sh > /tmp/hw.txt
-cat /tmp/hw.txt
+cat /proc/mtd                  # 应看到 u-boot/u-boot-env/factory/firmware/rootfs/rootfs_data
+free -m                        # Total 约 60MB
+ip -br link                    # LAN 口有 eth0.1，WAN 口有 eth0.2
+ls /sys/class/leds             # link / wifi / sys / 4g 四个
+cat /sys/class/net/eth0/address # BC:14:EF:E8:75:44
+iwinfo                         # 2.4G 射频存在，国家 CN
 ```
-重点核对 `Flash 型号` 是否为 `mx25l12835f`、`/proc/mtd` 分区是否与 DTS 一致、`ls /sys/class/leds` 是否有 4 个灯。
+
+- WAN 插线后 `eth0.2` 应该 up 并拿到地址（pppoe/dhcp 在 LuCI 里配）
+- 灯：`sys` 常亮、`link` 随网口活动闪、`wifi` 随无线流量闪、`4g` 默认灭
+- 若 `wifi`/`4g` 两灯位置对调，把 DTS 里 `led-wifi` 与 `led-4g` 的 `&gpio1 7` / `&gpio1 9` 互换重编即可（两颗是连续 GPIO，只有这两种可能）
 
 ---
 
-## 8. 已知限制
+## 7. 已知限制
 
-- **64MB 内存**：LuCI + Argon + mwan3 + nlbwmon 常驻约 30–35MB，够用但不宽裕，别再往上叠重型插件。
-- **7620A + 2.4G**：无线最高 802.11n 300Mbps（实际 100–150Mbps），没有 5G，也没有 802.11ac。
-- **路由性能**：单核 580MHz，NAT 转发约 300–600Mbps 小包；跑满千兆不现实，硬件加速补丁未启用。
-- **16MB Flash**：本配置约 6–7MB，还能再放 2–3 个中等插件；再加会撞 `check-size` 报错。
-- **4G 吞吐**：取决于模块与 USB 接口（7620A 只有 USB 2.0），Cat4 模块通常能跑 30–60Mbps。
-- **分区偏移是推断值**：未经你板子实测，第一次刷务必用 initramfs 先验证（6.3 第 1 步），不要直接 `sf erase` 写正式固件。
+- **64MB 内存**：LuCI + Argon + mwan3 + nlbwmon 常驻约 30–35MB，够用但不宽裕
+- **只有 2.4G**：802.11n 300Mbps 理论上限，实测 100–150Mbps
+- **overlay 约 3.4MB**：firmware 区 11MB 减去镜像约 7.6MB；`0xB10000` 那 5MB 原厂 jffs2 暂不回收（回收要在 U-Boot 里 `sf erase 0xB10000 0x4F0000` 后改 DTS 分区表，属于二期）
+- **NAT 性能**：单核 580MHz，约 300–600Mbps（小包更低），硬件加速未启用
+- **4G**：mini-PCIe 模块走 USB2.0，Cat4 模块通常 30–60Mbps；空槽时 `4g` 灯只作状态灯
