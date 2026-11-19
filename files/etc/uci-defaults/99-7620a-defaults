@@ -51,6 +51,24 @@ uci -q set dhcp.lan.start='100' || true
 uci -q set dhcp.lan.limit='150' || true
 uci -q set dhcp.lan.leasetime='12h' || true
 
+# ------------------------------------------------------------------
+# 指示灯：DTS 里 link 灯只写了 linux,default-trigger="netdev"，
+# 而 netdev 触发器不指定监视设备时永远不会亮 → 必须在 system 里补 dev。
+# 面板自左至右：上排 WIFI / 4G，下排 SYS / LINK。
+# ------------------------------------------------------------------
+if ! uci -q get system.led_7620a_link >/dev/null 2>&1; then
+	r=$(uci -q add system led) || true
+	uci -q set system.$r.name='link' || true
+	uci -q set system.$r.sysfs='link' || true
+	uci -q set system.$r.trigger='netdev' || true
+	uci -q set system.$r.dev='br-lan' || true
+	uci -q set system.$r.mode='link tx rx' || true
+	uci -q set system.$r.default='0' || true
+fi
+
+# SYS 灯（GPIO32）：常亮，DTS 里已是 default-on，这里再兜一层
+u -q set system.led_7620a_sys=led 2>/dev/null || true
+
 # 关闭可能干扰的默认服务
 uci -q set uhttpd.main.redirect_https='0' || true
 
