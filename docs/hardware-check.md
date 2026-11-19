@@ -31,7 +31,7 @@
 ```
 printenv              # bootdelay=5, bootcmd=tftp, ipaddr=10.10.10.123, serverip=10.10.10.3
 sf probe 0
-sf read 0x80000000 0x50000 0x100      # 读 uImage 头，0x64 年应为 27 05 19 56
+sf read 0x80000000 0x50000 0x100      # 读 uImage 头，开头 4 字节应为 27 05 19 56
 md.b 0x80000000 0x40
 ```
 
@@ -76,16 +76,20 @@ led-4g   { gpios = <&gpio1 9 GPIO_ACTIVE_LOW>; ... };
 
 ## 4. 有线口
 
-DTS 为 `mediatek,portmap = "llllw"`（port0 = LAN、port4 = WAN，与原厂 `lan_port=0 / wan_port=4` 一致）。
-MT7620 的 OpenWrt 用 DSA，不再有 `swconfig`，看口状态用：
+这一版走的是 **swconfig**（不是 DSA）：`target.mk` 里 `DEFAULT_PACKAGES += ... swconfig`，接口名就是 `eth0.1`（lan VLAN 1）/`eth0.2`（wan VLAN 2）。
+
+VLAN 与接口不是内核自动生成的，靠首启时 `/etc/board.d/02_network_sl-ir4` → `/etc/board.json` → `/bin/config_generate` → `/etc/config/network` 里的 `config switch switch0` + 两条 `config switch_vlan` 落地。
+**上游 mt7620 的 `02_network` 是 case 枚举、末尾没有 `*)` 兜底分支**，自建 compatible 不命中，所以本仓库自带一份。
+
+查证：
 
 ```sh
-ip -br link
-cat /sys/class/net/eth0.2/operstate
-dmesg | grep -i "link up"
+uci show network | grep -E "switch|device"   # 应有 switch0 / switch_vlan(1,2) / lan.device=eth0.1 / wan.device=eth0.2
+ip -br link                                   # eth0.1、eth0.2 应在列
+swconfig dev switch0 show                     # 看端口 link 状态与 VLAN
 ```
 
-如果实测两口反了，把 `"llllw"` 改成 `"wllll"` 重编（其余排列对本板无意义，只有这两个口被引出）。
+如果实测两口反了（插 LAN 口拿不到地址），把 VLAN 配置里两条 `ports` 互换（或改 DTS 的 `mediatek,portmap` 为 `"wllll"`）重编。
 
 ---
 
