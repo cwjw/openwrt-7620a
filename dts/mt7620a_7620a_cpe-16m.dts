@@ -1,13 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0-or-later OR MIT
-// 7620A 4G CPE 板级描述（16MB SPI-NOR / 128MB DDR2 / 1WAN+1LAN / 仅 2.4G / SIM 卡槽）
-// Flash: Macronix MX25L12835F (16MB)
-// 说明：
-//   - LED 与 reset 的 GPIO 号是按同类 7620A 4G 板（CPE102 / H8922）推断的，
-//     若某个灯不亮或按键位置不对，按 docs/hardware-check.md 的“GPIO 校准”小节修正后重编；
-//   - 分区表采用国产 7620A 板最常见的 16MB 布局：
-//       u-boot 0x00000-0x30000 / u-boot-env 0x30000-0x40000
-//       factory 0x40000-0x50000 / firmware 0x50000-0x1000000
-//     与原厂 web 升级时的写入偏移一致，刷机前请务必先用 TTL 核对（见 README 第 6 节）。
+// 板级描述：Sealan SL-IR4 / TX20（MT7620A + 16MB SPI-NOR + 64MB DDR2）
+// 1 LAN + 1 WAN，仅 2.4G，4 颗指示灯（link / wifi / sys / 4g），SIM 卡槽，1 个 reset 键
+//
+// 全部参数来自原厂 16MB 整片备份 D:\router\tx20-boot.bin 的逆向结果：
+//   分区：u-boot 0x00000 +0x30000 / u-boot-env 0x30000 +0x10000 / factory 0x40000 +0x10000
+//         firmware 0x50000 +0xAC0000（原厂 squashfs 数据止于 0xB0E004）
+//         rootfs_data（原厂 jffs2）0xB10000 +0x4F0000
+//   内核 cmdline：console=ttyS1,57600n8 root=/dev/mtdblock5
+//   网口：lan_port=0、wan_port=4（/etc/status/eth_led.sh）→ mediatek,portmap = "llllw"
+//   指示灯：link=GPIO30(netdev) sys=GPIO32 /etc/init.d/led status_led、wifi=GPIO31、4G=GPIO33
+//   按键：btnd reset 35 → GPIO35
+//   内存：W9751G6KB-25 单颗 64MB
+//
+// 注意：firmware 分区只到 0xB10000（与原厂固件区完全一致），
+//       不把 0xB10000 之后的原厂 jffs2 划进任何分区，避免开机把 SeaOS 的旧配置当 overlay 挂载。
 
 /dts-v1/;
 
@@ -18,7 +24,7 @@
 
 / {
 	compatible = "generic,7620a-cpe-16m", "ralink,mt7620a-soc";
-	model = "7620A 4G CPE (16MB, 1WAN + 1LAN)";
+	model = "Sealan SL-IR4 (TX20) 4G CPE";
 
 	aliases {
 		led-boot = &led_sys;
@@ -28,45 +34,53 @@
 	};
 
 	chosen {
-		bootargs = "console=ttyS0,115200";
+		bootargs = "console=ttyS1,57600n8";
 	};
 
 	leds {
 		compatible = "gpio-leds";
 
+		/* GPIO32：原厂 /etc/init.d/led 的 status_led = 32 */
 		led_sys: led-sys {
 			function = LED_FUNCTION_POWER;
 			color = <LED_COLOR_ID_GREEN>;
-			gpios = <&gpio1 2 GPIO_ACTIVE_LOW>;
+			gpios = <&gpio1 8 GPIO_ACTIVE_LOW>;
 			default-state = "on";
 		};
 
+		/* GPIO30：原厂 eth_led.sh 的 wan_lan_led_num = 30（link 灯） */
+		led-link {
+			label = "link";
+			function = "link";
+			color = <LED_COLOR_ID_GREEN>;
+			gpios = <&gpio1 6 GPIO_ACTIVE_LOW>;
+			linux,default-trigger = "netdev";
+		};
+
+		/* GPIO31：四灯中剩余的一颗，即 wifi 灯 */
 		led-wifi {
 			function = LED_FUNCTION_WLAN;
 			color = <LED_COLOR_ID_GREEN>;
-			gpios = <&gpio3 0 GPIO_ACTIVE_LOW>;
+			gpios = <&gpio1 7 GPIO_ACTIVE_LOW>;
 			linux,default-trigger = "phy0tpt";
 		};
 
+		/* GPIO33：原厂 ipsec/vpn 脚本用 "sealed 33 on/off" 点灯，即 4G/上网状态灯 */
 		led-4g {
+			label = "4g";
 			function = LED_FUNCTION_MOBILE;
 			color = <LED_COLOR_ID_GREEN>;
-			gpios = <&gpio1 14 GPIO_ACTIVE_LOW>;
-		};
-
-		led-link {
-			function = "link";
-			color = <LED_COLOR_ID_GREEN>;
-			gpios = <&gpio0 2 GPIO_ACTIVE_LOW>;
+			gpios = <&gpio1 9 GPIO_ACTIVE_LOW>;
 		};
 	};
 
 	keys {
 		compatible = "gpio-keys";
 
+		/* GPIO35：原厂 btnd reset 35 */
 		reset {
 			label = "reset";
-			gpios = <&gpio0 1 GPIO_ACTIVE_LOW>;
+			gpios = <&gpio1 11 GPIO_ACTIVE_LOW>;
 			linux,code = <KEY_RESTART>;
 		};
 	};
@@ -76,7 +90,8 @@
 	status = "okay";
 };
 
-&gpio3 {
+/* 板载 RS232（ADM3202）接在 UART0 上，原厂内核即 console=ttyS1,57600n8 */
+&uart {
 	status = "okay";
 };
 
@@ -128,7 +143,7 @@
 			partition@50000 {
 				compatible = "denx,uimage";
 				label = "firmware";
-				reg = <0x50000 0xfb0000>;
+				reg = <0x50000 0xac0000>;
 			};
 		};
 	};
@@ -137,8 +152,8 @@
 &ethernet {
 	nvmem-cells = <&macaddr_factory_4>;
 	nvmem-cell-names = "mac-address";
-	// w = WAN（port0），l = LAN（port1-4），板子只引出 port0/port1 两个口
-	mediatek,portmap = "wllll";
+	/* 原厂：port0 = LAN，port4 = WAN */
+	mediatek,portmap = "llllw";
 };
 
 &wmac {
@@ -146,9 +161,15 @@
 	nvmem-cell-names = "eeprom";
 };
 
+/*
+ * 只把确实被当作 GPIO 用的引脚组放开：
+ * LED(30-33) 落在 rgmii1 复用区，reset(35) 与 link 灯同组；
+ * i2c / wled 在本板上没有对应器件。
+ * 不放开 uartf —— 串口控制台要留在 UART0 上。
+ */
 &state_default {
-	default {
-		groups = "i2c", "spi refclk", "wled";
+	gpio {
+		groups = "i2c", "wled", "rgmii1", "rgmii2";
 		function = "gpio";
 	};
 };
