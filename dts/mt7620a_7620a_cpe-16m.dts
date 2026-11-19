@@ -1,16 +1,21 @@
 // SPDX-License-Identifier: GPL-2.0-or-later OR MIT
 // 板级描述：Sealan SL-IR4 / TX20（MT7620A + 16MB SPI-NOR + 128MB DDR2）
-// 1 LAN + 1 WAN，仅 2.4G，4 颗指示灯（link / wifi / sys / 4g），SIM 卡槽，1 个 reset 键
+// 1 LAN + 1 WAN，仅 2.4G，4 颗指示灯（上排 WIFI/4G，下排 SYS/LINK），SIM 卡槽，1 个 reset 键
 //
-// 全部参数来自原厂 16MB 整片备份 D:\router\tx20-boot.bin 的逆向结果：
+// 全部参数来自原厂 16MB 整片备份 D:\router\tx20-boot.bin 的逆向结果 + 设备实测：
 //   分区：u-boot 0x00000 +0x30000 / u-boot-env 0x30000 +0x10000 / factory 0x40000 +0x10000
 //         firmware 0x50000 +0xAC0000（原厂 squashfs 数据止于 0xB0E004）
 //         rootfs_data 0xB10000 +0x4F0000（原厂 jffs2 所在的尾巴，交给 OpenWrt 当 overlay）
 //   内核 cmdline：console=ttyS1,57600n8 root=/dev/mtdblock5
 //   网口：lan_port=0、wan_port=4（/etc/status/eth_led.sh）→ mediatek,portmap = "llllw"
-//   指示灯：link=GPIO30(netdev) sys=GPIO32 /etc/init.d/led status_led、wifi=GPIO31、4G=GPIO33
-//   按键：btnd reset 35 → GPIO35
 //   内存：W9751G6KB-25 单颗 128MB DDR2（W9751G6KB = 1Gb）
+//
+// 【指示灯映射：2026-11-20 在设备上用 /sys/class/leds/*/brightness 逐颗实测】
+//   GPIO30 → LINK 灯（实测确认，原厂 eth_led.sh 的 wan_lan_led_num = 30）
+//   GPIO31 → 4G 灯  （实测确认；此前误以为是 WIFI，已修正）
+//   GPIO32 → SYS 灯  （实测确认，原厂 /etc/init.d/led 的 status_led = 32）
+//   GPIO33 → 实测不驱动任何灯（原厂 ipsec 脚本里的 "sealed 33 on/off" 不是灯）
+//   WIFI 灯不在 30/31/32/33 上，改由 SoC 的硬件 WLED 脚（wled 功能）驱动。
 //
 // 注意：rootfs_data 必须显式声明。原厂在 0xB10000 放了 SeaOS 的 jffs2，
 //       不声明的话 fstools 会自己去扩大 rootfs 并把这玩意当 overlay 挂上，
@@ -48,7 +53,7 @@
 	leds {
 		compatible = "gpio-leds";
 
-		/* GPIO32：原厂 /etc/init.d/led 的 status_led = 32 */
+		/* GPIO32：原厂 /etc/init.d/led 的 status_led = 32，实测 = 面板 SYS */
 		led_sys: led-sys {
 			function = LED_FUNCTION_POWER;
 			color = <LED_COLOR_ID_GREEN>;
@@ -56,25 +61,18 @@
 			default-state = "on";
 		};
 
-		/* GPIO30：原厂 eth_led.sh 的 wan_lan_led_num = 30（link 灯） */
+		/* GPIO30：原厂 eth_led.sh 的 wan_lan_led_num = 30，实测 = 面板 LINK */
 		led-link {
 			label = "link";
 			gpios = <&gpio1 6 GPIO_ACTIVE_LOW>;
 			linux,default-trigger = "netdev";
 		};
 
-		/* GPIO31：四灯中剩余的一颗，即 wifi 灯 */
-		led-wifi {
-			function = LED_FUNCTION_WLAN;
-			color = <LED_COLOR_ID_GREEN>;
-			gpios = <&gpio1 7 GPIO_ACTIVE_LOW>;
-			linux,default-trigger = "phy0tpt";
-		};
-
-		/* GPIO33：原厂 ipsec/vpn 脚本用 "sealed 33 on/off" 点灯，即 4G/上网状态灯 */
+		/* GPIO31：实测 = 面板 4G */
 		led-4g {
 			label = "4g";
-			gpios = <&gpio1 9 GPIO_ACTIVE_LOW>;
+			gpios = <&gpio1 7 GPIO_ACTIVE_LOW>;
+			default-state = "off";
 		};
 	};
 
@@ -97,6 +95,20 @@
 /* 板载 RS232（ADM3202）接在 UART0 上，原厂内核即 console=ttyS1,57600n8 */
 &uart {
 	status = "okay";
+};
+
+/* WIFI 灯：实测不在 GPIO30~33 上，改交给 SoC 的硬件 WLED 脚
+ * （pinctrl 功能 "wled"，由 WMAC 自动按无线活动闪） */
+&wmac {
+	pinctrl-names = "default";
+	pinctrl-0 = <&wled_pins>;
+	nvmem-cells = <&eeprom_factory_0>;
+	nvmem-cell-names = "eeprom";
+
+	led {
+		led-sources = <0>;
+		led-active-low;
+	};
 };
 
 &spi0 {
@@ -166,20 +178,15 @@
 	mediatek,portmap = "llllw";
 };
 
-&wmac {
-	nvmem-cells = <&eeprom_factory_0>;
-	nvmem-cell-names = "eeprom";
-};
-
 /*
  * 只把确实被当作 GPIO 用的引脚组放开：
- * LED(30-33) 落在 rgmii1 复用区，reset(35) 与 link 灯同组；
- * i2c / wled 在本板上没有对应器件。
+ * LED(30-32) 落在 rgmii1 复用区，reset(35) 与 link 灯同组；
+ * i2c / wled 在本板上没有对应器件（wled 留给硬件 WIFI 灯，不再抢成 gpio）。
  * 不放开 uartf —— 串口控制台要留在 UART0 上。
  */
 &state_default {
 	gpio {
-		groups = "i2c", "wled", "rgmii1", "rgmii2";
+		groups = "i2c", "rgmii1", "rgmii2";
 		function = "gpio";
 	};
 };
