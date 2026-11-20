@@ -37,14 +37,14 @@
 
 1. 写 `TMR1LOAD = timeout * freq`；
 2. 写 `TMRSTAT` 的 `TMR1RST`（`BIT(5)`）重装位；
-3. 重写一遍带 `EDNABLE` 的 `TMR1CTL`（覆盖“写 ENABLE 即重装”的设计）。
+3. 重写一遍带 `ENABLE` 的 `TMR1CTL`（覆盖“写 ENABLE 即重装”的设计）。
 
 配套两点：
 
-- **映射**：`TMRSTAT` 在 `0x100`，而 watchdog 节点是 `0x120 + 0x10`，窗口够不到。补丁用 `devm_ioremap(res->start - 0x20, 4)` 补一个只读/写 4 字节的附属映射（不用 `ioremap_resource`，避开与 `timer@100` 的资源重叠冲突）。
+- **映射**：`TMRSTAT` 在 `0x100`，而 watchdog 节点是 `0x120 + 0x10`，窗口够不到。补丁用 `devm_ioremap(res->start - 0x20, 4)` 补一个只写 4 字节的附属映射（不用 `ioremap_resource`，避开与 `timer@100` 的资源重叠冲突）。
 - **诊断**：probe 时打印 `TMR1CTL`（含 `running_at_probe`）、`TMRSTAT`、`SYSC_RSTSTAT`（含 `last_reset_watchdog`）。这三行是判断复位源的关键证据。
 
-保留 `REG` 不变、不动 `mt7620a.dtsi`，避免影响其它 mt7620 板型。
+保留 DT 的 `reg` 不变、不动 `mt7620a.dtsi`，避免影响其它 mt7620 板型。
 
 ## 四、为什么不选“方案A（直接 disabled）”
 
@@ -81,11 +81,6 @@ uptime; sleep 240; uptime
 
 - 能过 **15 分钟**：修复成立。
 - 又在 **107 秒附近**归零：说明三套重装机制都没命中（极罕见），此时再看一次 `last_reset_watchdog`：为 1 → 硬件重装位定义与实际不符；为 0 → 复位根本不是看门狗。
-
-```sh
-# 3. 如果还想看复位计数（可选）
-dmesg | grep -c "rt2880_wdt"
-```
 
 ## 六、回退
 
