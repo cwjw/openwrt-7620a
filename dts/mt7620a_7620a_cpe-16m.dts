@@ -185,12 +185,13 @@
 };
 
 /*
- * 关闭 SoC 硬件看门狗（rt2880_wdt）。
- * 依据：本板上内核打开 /dev/watchdog 后无法稳定喂狗，1~2 分钟即被硬复位；
- * 解绑驱动后现场仍复位（计数器残值仍在跑），需要从驱动层就不注册。
- * 对照：原厂 rc.local 里有 `watchdog -T /dev/watchdog -s 5`（用户态每 5s 喂狗），
- * 说明硬件狗本身是好的，问题在“谁在喂”。本版先关掉，用于隔离验证。
+ * 方案B：SoC 硬件看门狗（rt2880_wdt）保持启用，不再用 disabled 去躲。
+ * 真正的病根在驱动：ping 只写了 TMR1LOAD，没有脉冲 TMRSTAT 的 TMR1RST，
+ * 计数器根本不会重载，所以一旦 start() 就必然在 max_timeout(40MHz → 107s) 后硬复位。
+ * 修正由 patches/rt2880-wdt-fix-ping.patch 在编译期打进内核。
+ * 这样无论计数器是驱动自己武装的、还是 U-Boot 遗留武装的，都能被正常喂住，
+ * 同时保留硬件看门狗保护。
  */
 &watchdog {
-	status = "disabled";
+	status = "okay";
 };
