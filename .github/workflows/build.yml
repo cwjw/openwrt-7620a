@@ -11,13 +11,27 @@ on:
         description: '构建成功后发布 Release 的 tag 名（留空只上传 Artifact）'
         required: false
         default: ''
+  # 供 auto.yml 调用：往仓库根目录的 .ci-trigger 推一行就能启动构建，
+  # 不需要人在 Actions 页面点 Run workflow。
+  workflow_call:
+    inputs:
+      branch:
+        description: 'ImmortalWrt 源码分支'
+        type: string
+        required: false
+        default: 'openwrt-24.10'
+      tag:
+        description: '发布 Release 的 tag 名（留空只传 Artifact）'
+        type: string
+        required: false
+        default: ''
   push:
     tags:
       - 'v*'
 
 env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt
-  REPO_BRANCH: ${{ github.event.inputs.branch || 'openwrt-24.10' }}
+  REPO_BRANCH: ${{ github.event.inputs.branch || inputs.branch || 'openwrt-24.10' }}
   TZ: Asia/Shanghai
   DEVICE_ID: 7620a_cpe-16m
   FACTORY_SIZE: '11534336'
@@ -126,6 +140,12 @@ jobs:
           ls -l "target/linux/ramips/dts/mt7620a_${DEVICE_ID}.dts" \
             || { echo "::error::板级 DTS 未注入源码树"; exit 1; }
 
+          echo "=== 方案C 校验：DTS 里 watchdog 必须是 disabled ==="
+          grep -A3 '&watchdog {' "target/linux/ramips/dts/mt7620a_${DEVICE_ID}.dts" \
+            | grep -q 'disabled' \
+            || { echo "::error::DTS 未禁用 watchdog，本版会武装硬件看门狗"; exit 1; }
+          echo "==> 方案C 校验通过（看门狗不会武装）"
+
           echo "=== board.d 网络脚本 ==="
           ls -l files/etc/board.d/ || { echo "::error::board.d 未注入"; exit 1; }
           grep -q 'ucidef_add_switch' files/etc/board.d/02_network_sl-ir4 \
@@ -206,11 +226,11 @@ jobs:
           retention-days: 30
 
       - name: 发布 Release
-        if: success() && (github.event.inputs.tag != '' || startsWith(github.ref, 'refs/tags/'))
+        if: success() && (github.event.inputs.tag != '' || inputs.tag != '' || startsWith(github.ref, 'refs/tags/'))
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          name: MT7620A 固件 ${{ github.event.inputs.tag || github.ref_name }}
+          tag_name: ${{ github.event.inputs.tag || inputs.tag || github.ref_name }}
+          name: MT7620A 固件 ${{ github.event.inputs.tag || inputs.tag || github.ref_name }}
           body: |
             自动云编译产物（ImmortalWrt ${{ env.REPO_BRANCH }}，ramips/mt7620）。
             刷机前请先确认机型与闪存容量，见仓库 README。
