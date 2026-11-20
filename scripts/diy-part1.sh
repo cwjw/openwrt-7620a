@@ -29,6 +29,19 @@ if grep -A3 '&watchdog {' target/linux/ramips/dts/mt7620a_7620a_cpe-16m.dts | gr
   echo "!! DTS 仍把 watchdog 置为 disabled，方案B 不会生效"; exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# 排障期开关：打开 watchdog sysfs，才能看到 /sys/class/watchdog/*/state|timeleft
+# 用来判定计数器是否被某个进程武装、timeleft 是否在被刷新。定案后可删掉这段。
+# ---------------------------------------------------------------------------
+echo "==> 打开 CONFIG_WATCHDOG_SYSFS（排障用）"
+KCFG=target/linux/ramips/mt7620/config-6.6
+if grep -q 'CONFIG_WATCHDOG_SYSFS' "$KCFG"; then
+  sed -i 's/.*CONFIG_WATCHDOG_SYSFS.*/CONFIG_WATCHDOG_SYSFS=y/' "$KCFG"
+else
+  echo 'CONFIG_WATCHDOG_SYSFS=y' >> "$KCFG"
+fi
+grep -qx 'CONFIG_WATCHDOG_SYSFS=y' "$KCFG" || { echo "!! CONFIG_WATCHDOG_SYSFS 未写入"; exit 1; }
+
 echo "==> 追加镜像定义到 ramips/mt7620"
 MK=target/linux/ramips/image/mt7620.mk
 if ! grep -q 'Device/7620a_cpe-16m' "$MK"; then
