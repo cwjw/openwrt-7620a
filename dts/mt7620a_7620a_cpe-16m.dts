@@ -14,13 +14,18 @@
 // 自动生成的同名分区存在冲突风险（双 rootfs_data）。现在交给 mtdsplit 自切，
 // 这是已经验证能正常启动的配置。原厂 jffs2 仍留在 0xB10000，由 82_7620a_overlay_guard 清理/忽略。
 //
-// 实测确认的板级参数（来自原厂 16MB 备份 D:\router\tx20-boot.bin + 设备实测）：
+// 实测确认的板级参数（来自原厂 16MB 备份 D:\router\tx20-boot.bin + 设备实测
+//   以及原厂 squashfs rootfs 反解后的脚本）：
 //   分区：u-boot 0x00000 +0x30000 / u-boot-env 0x30000 +0x10000 / factory 0x40000 +0x10000
 //         firmware 0x50000 +0xAC0000（原厂 squashfs 数据止于 0xB0E004）
 //   内核 cmdline：console=ttyS1,57600n8 root=/dev/mtdblock5
 //   网口：lan_port=0、wan_port=4（/etc/status/eth_led.sh）→ mediatek,portmap = "llllw"
-//   灯：GPIO30 = LINK、GPIO32 = SYS、GPIO31 = WIFI（实测），GPIO33 实测无灯
-//       （4G 灯引脚未定位，不猜、不定义）
+//   灯（全部来自原厂 rootfs 里 sealed <gpio> <state> 的调用）：
+//     GPIO30 = LINK   （/etc/status/eth_led.sh: wan_lan_led_num=30）
+//     GPIO32 = SYS    （/etc/diag.sh: status_led=32）
+//     GPIO31 = 4G     （实测点亮 4G 灯；原厂脚本未引用此脚，故原为“未知”，本轮按实测纠正）
+//     GPIO33 = WIFI   （原厂 /etc/status/ipsec.sh、vpn.sh 里 sealed 33 on/off，是本板上确实)
+//                     (存在的第 4 颗灯脚；WIFI 归属待现场再确认一次)
 //   按键：btnd reset 35 → GPIO35
 
 /dts-v1/;
@@ -48,7 +53,7 @@
 	leds {
 		compatible = "gpio-leds";
 
-		/* GPIO32：原厂 /etc/init.d/led 的 status_led = 32，实测 = 面板 SYS */
+		/* GPIO32：原厂 /etc/diag.sh 的 status_led = 32，实测 = 面板 SYS */
 		led_sys: led-sys {
 			function = LED_FUNCTION_POWER;
 			color = <LED_COLOR_ID_GREEN>;
@@ -63,11 +68,19 @@
 			linux,default-trigger = "netdev";
 		};
 
-		/* GPIO31：实测该引脚即为期望的 wifi 指示（label 不能用连字符，故不设 label） */
+		/* GPIO31：实测点亮 4G 灯。上一版误把它当成 WIFI，本轮纠正 */
+		led-4g {
+			label = "4g";
+			gpios = <&gpio1 7 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+
+		/* GPIO33：原厂 ipsec.sh / vpn.sh 用 sealed 33 控制，是本板第 4 颗灯
+		 * 若现场发现 WIFI 灯不亮，用 /sys/class/gpio 扫 33/29/34/36 再定案 */
 		led-wifi {
 			function = LED_FUNCTION_WLAN;
 			color = <LED_COLOR_ID_GREEN>;
-			gpios = <&gpio1 7 GPIO_ACTIVE_LOW>;
+			gpios = <&gpio1 9 GPIO_ACTIVE_LOW>;
 			linux,default-trigger = "phy0tpt";
 		};
 	};
@@ -161,7 +174,7 @@
 
 /*
  * 只把确实被当作 GPIO 用的引脚组放开：
- * LED(30-32) 落在 rgmii1 / wled 复用区，reset(35) 与 link 灯同组；
+ * LED(30-33) 落在 rgmii1 / wled 复用区，reset(35) 与 link 灯同组；
  * i2c 在本板上没有对应器件。
  * 不放开 uartf —— 串口控制台要留在 UART0 上。
  */
@@ -192,13 +205,17 @@
  *   之后每 5 秒 write "X" 喂狗），因此硬件计数器 TMR1 从头到尾不会有任何倒计时，
  *   硬件层面不存在任何可能触发复位的看门狗。
  *
+ * 补充证据（反解原厂镜像后得出）：原厂是武装看门狗的 —— /etc/init.d/done 里
+ *   `watchdog -T /dev/watchdog -s 5`（/usr/bin/watchdog，MTK APSoC WatchDog Daemon），
+ *   但它从不 ioctl 设超时，只用驱动默认值，每 5 秒 write 一字节喂狗。
+ *   另：原厂 U-Boot 里找不到 TMR1LOAD/TMR1CTL 常量，可排除 bootloader 武装看门狗。
+ *
  * 判读：
- *   ① 本镜像不再自动重启 → 根因即为看门狗（实测死点在 158/165/166/172.61 秒，
- *      与“最后一次成功喂狗 + 30 秒”的特征吻合），永久保持 disabled 即可。
+ *   ① 本镜像不再自动重启 → 根因即为看门狗（实测死点在 158/165/166/172.61 秒），
+ *      终局方案应改成“像原厂那样武装 + 让 write 喂狗真正生效”，而不是永久关闭。
  *   ② 本镜像仍在 ~170 秒重启 → 看门狗彻底出局，转查硬件级复位（电源/复位线）。
  *
- * 注：方案B（patches/rt2880-wdt-fix-ping.patch）仍然保留在源码树里，本镜像里它
- *   不会被执行，因为节点已 disabled；确认结论后可据此决定删或不删该补丁。
+ * 注：方案B（patches/rt2880-wdt-fix-ping.patch）仍保留在源码树里，本镜像不执行。
  */
 &watchdog {
 	status = "disabled";
