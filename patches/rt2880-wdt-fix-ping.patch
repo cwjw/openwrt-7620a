@@ -1,0 +1,80 @@
+--- a/drivers/watchdog/rt2880_wdt.c
++++ b/drivers/watchdog/rt2880_wdt.c
+@@ -28,7 +28,11 @@
+ #define TIMER_REG_TMR1LOAD		0x00
+ #define TIMER_REG_TMR1CTL		0x08
+ 
++#define TIMER_REG_TMRSTAT		0x00
+ #define TMRSTAT_TMR1RST			BIT(5)
++/* TMRSTAT 是 timer block 的起始寄存器(0x100)，watchdog 节点从 0x120 起，
++ * 相差 0x20，需要单独映射才能写 TMR1RST。 */
++#define TIMER_TMRSTAT_GAP		0x20
+ 
+ #define TMR1CTL_ENABLE			BIT(7)
+ #define TMR1CTL_MODE_SHIFT		4
+@@ -42,6 +46,7 @@
+ 
+ struct rt2880_wdt_data {
+ 	void __iomem *base;
++	void __iomem *stat;
+ 	unsigned long freq;
+ 	struct clk *clk;
+ 	struct reset_control *rst;
+@@ -68,7 +73,14 @@
+ {
+ 	struct rt2880_wdt_data *drvdata = watchdog_get_drvdata(w);
+ 
++	/*
++	 * WDT 模式下写 TMR1LOAD 只是更新“重装值”，并不会让正在倒数的
++	 * 计数器重载；必须再向 TMRSTAT 的 TMR1RST 位写 1，硬件才会把
++	 * TMR1LOAD 重新装进计数器。上游只写 TMR1LOAD，等于从未真正喂狗，
++	 * 一旦 start() 就会在 max_timeout 后硬复位。
++	 */
+ 	rt_wdt_w32(drvdata->base, TIMER_REG_TMR1LOAD, w->timeout * drvdata->freq);
++	rt_wdt_w32(drvdata->stat, TIMER_REG_TMRSTAT, TMRSTAT_TMR1RST);
+ 
+ 	return 0;
+ }
+@@ -126,7 +138,8 @@
+ 
+ static const struct watchdog_info rt288x_wdt_info = {
+ 	.identity = "Ralink Watchdog",
+-	.options = WDIOF_SETTIMEOUT | WDIOF_KEEPALIVEPING | WDIOF_MAGICCLOSE,
++	.options = WDIOF_SETTIMEOUT | WDIOF_KEEPALIVEPING | WDIOF_MAGICCLOSE |
++		   WDIOF_CARDRESET,
+ };
+ 
+ static const struct watchdog_ops rt288x_wdt_ops = {
+@@ -142,6 +155,8 @@
+ 	struct device *dev = &pdev->dev;
+ 	struct watchdog_device *wdt;
+ 	struct rt2880_wdt_data *drvdata;
++	struct resource *res;
++	u32 t;
+ 	int ret;
+ 
+ 	drvdata = devm_kzalloc(dev, sizeof(*drvdata), GFP_KERNEL);
+@@ -152,6 +167,23 @@
+ 	if (IS_ERR(drvdata->base))
+ 		return PTR_ERR(drvdata->base);
+ 
++	/* TMRSTAT 在 0x100，落在 watchdog 节点(0x120)窗口之外，单独映射 */
++	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++	if (!res)
++		return -ENODEV;
++	drvdata->stat = devm_ioremap(dev, res->start - TIMER_TMRSTAT_GAP,
++				     sizeof(u32));
++	if (!drvdata->stat)
++		return -ENOMEM;
++
++	/* 诊断：开机时计数器是否已被 bootloader 武装、上一次复位是不是看门狗干的 */
++	t = rt_wdt_r32(drvdata->base, TIMER_REG_TMR1CTL);
++	dev_info(dev, "TMR1CTL=%08x (running_at_probe=%d) TMRSTAT=%08x\n",
++		 t, !!(t & TMR1CTL_ENABLE), rt_wdt_r32(drvdata->stat, TIMER_REG_TMRSTAT));
++	dev_info(dev, "SYSC_RSTSTAT=%08x (last_reset_watchdog=%d)\n",
++		 rt_sysc_r32(SYSC_RSTSTAT),
++		 !!(rt_sysc_r32(SYSC_RSTSTAT) & WDT_RST_CAUSE));
++
+ 	drvdata->clk = devm_clk_get(dev, NULL);
+ 	if (IS_ERR(drvdata->clk))
+ 		return PTR_ERR(drvdata->clk);
