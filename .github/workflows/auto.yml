@@ -1,0 +1,21 @@
+name: Auto Build (switch file)
+
+# 作用：把“点 Run workflow”换成“改一行文本”。
+# 任何人对仓库根目录 .ci-trigger 的修改（push 到 main）都会直接复调用 build.yml，
+# 参数固定为 openwrt-24.10，不需要人在 Actions 页面操作。
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.ci-trigger'
+
+jobs:
+  build:
+    permissions:
+      contents: write
+    uses: ./.github/workflows/build.yml
+    with:
+      branch: openwrt-24.10
+      tag: ''
