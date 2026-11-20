@@ -146,7 +146,18 @@ jobs:
           # 必须开 pipefail，否则 `make | tee` 会把 make 的失败吞掉，
           # 表现为“构建成功但产物不全”（Run #4 就是这样被掩盖的）。
           set -o pipefail
-          make -j$(nproc) 2>&1 | tee build.log
+          if make -j$(nproc) 2>&1 | tee build.log; then
+            exit 0
+          fi
+          echo "::warning::首次构建失败，重跑详细日志以定位真正的错误行"
+          # 非 verbose 日志只到顶层目标行，看不出内核子构建的具体错误；
+          # 这里用 -j1 V=s 复用已编译对象，只补跑失败的那部分。
+          make -j1 V=s 2>&1 | tee build-detail.log || true
+          echo "===== 错误摘要（error / Error） ====="
+          grep -n -iE "error:|Error [0-9]|fatal error|undefined reference|No rule to make target" build-detail.log | tail -n 80 || true
+          echo "===== 详细日志尾部 150 行 ====="
+          tail -n 150 build-detail.log || true
+          exit 1
 
       - name: 核对产物（尺寸不符直接失败）
         if: success()
@@ -214,5 +225,6 @@ jobs:
           name: build-log-${{ github.run_number }}
           path: |
             openwrt/build.log
+            openwrt/build-detail.log
             /tmp/defconfig.log
           if-no-files-found: ignore

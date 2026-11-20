@@ -19,7 +19,7 @@ PATCH_DST="target/linux/ramips/patches-6.6/999-rt2880-wdt-fix-ping.patch"
 [ -f "$PATCH_SRC" ] || { echo "!! 找不到 $PATCH_SRC"; exit 1; }
 cp -f "$PATCH_SRC" "$PATCH_DST"
 # 自检：补丁必须真的动到了两处关键位置，否则等于没打
-for k in 'TIMER_TMRSTAT_GAP' 'rt_wdt_w32(drvdata->stat, TIMER_REG_TMRSTAT, TMRSTAT_TMR1RST)'; do
+for k in 'TIMER_TMRSTAT_GAP' 'rt_wdt_stat_w32(drvdata, TMRSTAT_TMR1RST)'; do
   grep -qF "$k" "$PATCH_DST" || { echo "!! 补丁缺少关键行：$k"; exit 1; }
 done
 
@@ -47,10 +47,10 @@ define Device/7620a_cpe-16m
 	DEVICE_VARIANT := TX20
 	IMAGE_SIZE := 11264k
 	IMAGES += factory.bin
-	# 固件区长度 0xAC0000 = 11272192，镜像正好填满该段；
-	# 之前 pad 到 11534336(0xB00000) 会尾部越界 0x40000，落到 0xB10000 之后的无分区区。
+	# 原厂 web 升级页已实测接受 11534336(0xB00000) 的镜像并刷写成功，沿用该值，
+	# 与 workflow 的 FACTORY_SIZE 校验保持一致；不要改成 11272192。
 	IMAGE/factory.bin := append-kernel | append-rootfs | pad-rootfs | \
-		pad-to 11272192 | check-size
+		pad-to 11534336 | check-size
 	DEVICE_PACKAGES := kmod-rt2800-soc kmod-usb2 kmod-usb-ohci \
 		kmod-usb-net-qmi-wwan kmod-usb-net-cdc-ether kmod-usb-net-cdc-mbim \
 		kmod-usb-serial-option usb-modeswitch uqmi luci-proto-qmi

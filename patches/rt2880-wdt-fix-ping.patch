@@ -1,40 +1,60 @@
+From: cwjw <noreply@github.com>
+Subject: [PATCH] watchdog: rt2880_wdt: 喂狗时同时脉冲 TMRSTAT.TMR1RST
+
+只写 TMR1LOAD 未必真正重装硬件计数器（TMR1RST 位在驱动里定义了却从未使用），
+再补一拍 TMRSTAT.TMR1RST，并重写一次 ENABLE 位，三条路径任一有效即可喂住。
+顺便在 probe 打印 TMR1CTL / TMRSTAT / SYSC_RSTSTAT，便于判读复位来源。
+
+---
 --- a/drivers/watchdog/rt2880_wdt.c
 +++ b/drivers/watchdog/rt2880_wdt.c
-@@ -28,7 +28,11 @@
+@@ -16,6 +16,7 @@
+ #include <linux/moduleparam.h>
+ #include <linux/platform_device.h>
+ #include <linux/mod_devicetable.h>
++#include <linux/io.h>
+ 
+ #include <asm/mach-ralink/ralink_regs.h>
+ 
+@@ -28,7 +29,11 @@
  #define TIMER_REG_TMR1LOAD		0x00
  #define TIMER_REG_TMR1CTL		0x08
  
 +#define TIMER_REG_TMRSTAT		0x00
  #define TMRSTAT_TMR1RST			BIT(5)
-+/* TMRSTAT 是 timer block 的起始寄存器(0x100)，watchdog 节点从 0x120 起，
-+ * 相差 0x20，需要单独映射才能写 TMR1RST。 */
++/* TMRSTAT 是 timer 块的首寄存器(0x100)，本驱动窗口从 0x120 起，相差 0x20；
++ * palmbus 按页映射，0x100 与 0x120 同页，可用负偏移直接访问。 */
 +#define TIMER_TMRSTAT_GAP		0x20
  
  #define TMR1CTL_ENABLE			BIT(7)
  #define TMR1CTL_MODE_SHIFT		4
-@@ -42,6 +46,7 @@
+@@ -64,11 +69,33 @@
+ 	return ioread32(base + reg);
+ }
  
- struct rt2880_wdt_data {
- 	void __iomem *base;
-+	void __iomem *stat;
- 	unsigned long freq;
- 	struct clk *clk;
- 	struct reset_control *rst;
-@@ -67,8 +72,21 @@
++/* TMRSTAT(0x100) 落在 watchdog 节点(0x120)窗口之外，用同页负偏移访问 */
++static inline void rt_wdt_stat_w32(struct rt2880_wdt_data *drvdata, u32 val)
++{
++	iowrite32(val, drvdata->base - TIMER_TMRSTAT_GAP);
++}
++
++static inline u32 rt_wdt_stat_r32(struct rt2880_wdt_data *drvdata)
++{
++	return ioread32(drvdata->base - TIMER_TMRSTAT_GAP);
++}
++
  static int rt288x_wdt_ping(struct watchdog_device *w)
  {
  	struct rt2880_wdt_data *drvdata = watchdog_get_drvdata(w);
 +	u32 t;
  
-+	/*
-+	 * 喂狗要同时盖住三套重装机制，任何一个生效就不会复位：
-+	 *  1) 写 TMR1LOAD（MTK SDK 的 ramips_wdt 就是这么喂的）；
-+	 *  2) 写 TMRSTAT 的 TMR1RST 重装位（本文件早就定义了这个常量却从未使用，
-+	 *     同族的 mt7621_wdt 正是靠写 TMRSTAT 喂狗）；
-+	 *  3) 重新写一遍带 ENABLE 的 TMR1CTL，覆盖“写 ENABLE 即重装”的设计。
-+	 */
  	rt_wdt_w32(drvdata->base, TIMER_REG_TMR1LOAD, w->timeout * drvdata->freq);
-+	rt_wdt_w32(drvdata->stat, TIMER_REG_TMRSTAT, TMRSTAT_TMR1RST);
++	/*
++	 * 只写 TMR1LOAD 未必会真正重装计数器（本文件早就定义了 TMR1RST 位却
++	 * 从未使用），因此额外向 TMRSTAT 打 TMR1RST；最后再把 ENABLE 位重写
++	 * 一遍，覆盖“写使能即启动”的实现差异。三条路径任一有效即可喂住。
++	 */
++	rt_wdt_stat_w32(drvdata, TMRSTAT_TMR1RST);
 +
 +	t = rt_wdt_r32(drvdata->base, TIMER_REG_TMR1CTL);
 +	t |= TMR1CTL_ENABLE;
@@ -42,46 +62,16 @@
  
  	return 0;
  }
-@@ -126,7 +144,8 @@
+@@ -162,6 +189,12 @@
  
- static const struct watchdog_info rt288x_wdt_info = {
- 	.identity = "Ralink Watchdog",
--	.options = WDIOF_SETTIMEOUT | WDIOF_KEEPALIVEPING | WDIOF_MAGICCLOSE,
-+	.options = WDIOF_SETTIMEOUT | WDIOF_KEEPALIVEPING | WDIOF_MAGICCLOSE |
-+		   WDIOF_CARDRESET,
- };
+ 	drvdata->freq = clk_get_rate(drvdata->clk) / RALINK_WDT_PRESCALE;
  
- static const struct watchdog_ops rt288x_wdt_ops = {
-@@ -142,6 +161,8 @@
- 	struct device *dev = &pdev->dev;
- 	struct watchdog_device *wdt;
- 	struct rt2880_wdt_data *drvdata;
-+	struct resource *res;
-+	u32 t;
- 	int ret;
- 
- 	drvdata = devm_kzalloc(dev, sizeof(*drvdata), GFP_KERNEL);
-@@ -152,6 +173,23 @@
- 	if (IS_ERR(drvdata->base))
- 		return PTR_ERR(drvdata->base);
- 
-+	/* TMRSTAT 在 0x100，落在 watchdog 节点(0x120)窗口之外，单独映射 */
-+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-+	if (!res)
-+		return -ENODEV;
-+	drvdata->stat = devm_ioremap(dev, res->start - TIMER_TMRSTAT_GAP,
-+				     sizeof(u32));
-+	if (!drvdata->stat)
-+		return -ENOMEM;
++	/* 取证：开机时计数器是否已被 bootloader 武装、上次复位是否看门狗所致 */
++	dev_info(dev, "TMR1CTL=%08x(en=%d) TMRSTAT=%08x SYSC_RSTSTAT=%08x\n",
++		 rt_wdt_r32(drvdata->base, TIMER_REG_TMR1CTL),
++		 !!(rt_wdt_r32(drvdata->base, TIMER_REG_TMR1CTL) & TMR1CTL_ENABLE),
++		 rt_wdt_stat_r32(drvdata), rt_sysc_r32(SYSC_RSTSTAT));
 +
-+	/* 诊断：开机时计数器是否已被 bootloader 武装、上一次复位是不是看门狗干的 */
-+	t = rt_wdt_r32(drvdata->base, TIMER_REG_TMR1CTL);
-+	dev_info(dev, "TMR1CTL=%08x (running_at_probe=%d) TMRSTAT=%08x\n",
-+		 t, !!(t & TMR1CTL_ENABLE), rt_wdt_r32(drvdata->stat, TIMER_REG_TMRSTAT));
-+	dev_info(dev, "SYSC_RSTSTAT=%08x (last_reset_watchdog=%d)\n",
-+		 rt_sysc_r32(SYSC_RSTSTAT),
-+		 !!(rt_sysc_r32(SYSC_RSTSTAT) & WDT_RST_CAUSE));
-+
- 	drvdata->clk = devm_clk_get(dev, NULL);
- 	if (IS_ERR(drvdata->clk))
- 		return PTR_ERR(drvdata->clk);
+ 	wdt = &drvdata->wdt;
+ 	wdt->info = &rt288x_wdt_info;
+ 	wdt->ops = &rt288x_wdt_ops;
