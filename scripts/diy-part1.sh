@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 编译前第一步：注入板级 DTS + 镜像定义 + 方案B 内核补丁，刷新 feeds，做少量裁剪
+# 编译前第一步：注入板级 DTS + 镜像定义 + 内核看门狗补丁，刷新 feeds，做少量裁剪
 # 约定：由仓库根目录执行，源码目录为 ./openwrt
 set -euo pipefail
 
@@ -10,10 +10,12 @@ echo "==> 注入板级 DTS（Sealan SL-IR4 / TX20）"
 cp -f "$ROOT/dts/mt7620a_7620a_cpe-16m.dts" target/linux/ramips/dts/
 
 # ---------------------------------------------------------------------------
-# 方案B：修正 rt2880_wdt 的喂狗逻辑（ping 时脉冲 TMRSTAT.TMR1RST）
+# 方案B（备选）：修正 rt2880_wdt 的喂狗逻辑（ping 时脉冲 TMRSTAT.TMR1RST）
 # 放到 ramips 的 patches-6.6，编号 999 排在其他 ramips 补丁之后，避免上下文冲突。
+# 当前 DTS 已把 &watchdog 置为 disabled（方案C），驱动不会被 probe，本补丁只会被
+# 编译进内核但不会执行；保留它便于方案C 排除看门狗后回头再做“真喂狗”的永久修法。
 # ---------------------------------------------------------------------------
-echo "==> 注入方案B 内核补丁（rt2880_wdt fix-ping）"
+echo "==> 注入方案B 内核补丁（rt2880_wdt fix-ping，目前不生效，仅保留待用）"
 PATCH_SRC="$ROOT/patches/rt2880-wdt-fix-ping.patch"
 PATCH_DST="target/linux/ramips/patches-6.6/999-rt2880-wdt-fix-ping.patch"
 [ -f "$PATCH_SRC" ] || { echo "!! 找不到 $PATCH_SRC"; exit 1; }
@@ -23,17 +25,23 @@ for k in 'TIMER_TMRSTAT_GAP' 'rt_wdt_stat_w32(drvdata, TMRSTAT_TMR1RST)'; do
   grep -qF "$k" "$PATCH_DST" || { echo "!! 补丁缺少关键行：$k"; exit 1; }
 done
 
-# 自检：看门狗节点必须是 okay（方案B 依赖驱动真的 probe）
-grep -q '&watchdog {' target/linux/ramips/dts/mt7620a_7620a_cpe-16m.dts || { echo "!! DTS 中没有 &watchdog 节点"; exit 1; }
-if grep -A3 '&watchdog {' target/linux/ramips/dts/mt7620a_7620a_cpe-16m.dts | grep -q 'disabled'; then
-  echo "!! DTS 仍把 watchdog 置为 disabled，方案B 不会生效"; exit 1
+# ---------------------------------------------------------------------------
+# 方案C（当前生效，用于一次性判定复位来源）：看门狗彻底不武装
+# DTS 里 &watchdog 必须为 disabled → 内核不注册 /dev/watchdog → procd 的
+# watchdog_init() 拿不到设备，硬件计数器 TMR1 不会有任何倒计时。
+# ---------------------------------------------------------------------------
+echo "==> 校验方案C：&watchdog 必须为 disabled"
+grep -q '&watchdog {' target/linux/ramips/dts/mt7620a_7620a_cpe-16m.dts \
+  || { echo "!! DTS 中没有 &watchdog 节点"; exit 1; }
+if ! grep -A3 '&watchdog {' target/linux/ramips/dts/mt7620a_7620a_cpe-16m.dts | grep -q 'disabled'; then
+  echo "!! DTS 仍把 watchdog 置为开启，方案C 要求 disabled"; exit 1
 fi
 
 # ---------------------------------------------------------------------------
-# 排障期开关：打开 watchdog sysfs，才能看到 /sys/class/watchdog/*/state|timeleft
-# 用来判定计数器是否被某个进程武装、timeleft 是否在被刷新。定案后可删掉这段。
+# 保留：打开 watchdog sysfs（若将来重新启用方案B，这行才有意义；方案C 下无对象）
+# 定案后可删掉这段。
 # ---------------------------------------------------------------------------
-echo "==> 打开 CONFIG_WATCHDOG_SYSFS（排障用）"
+echo "==> 保留 CONFIG_WATCHDOG_SYSFS=y（排障预留）"
 KCFG=target/linux/ramips/mt7620/config-6.6
 if grep -q 'CONFIG_WATCHDOG_SYSFS' "$KCFG"; then
   sed -i 's/.*CONFIG_WATCHDOG_SYSFS.*/CONFIG_WATCHDOG_SYSFS=y/' "$KCFG"
