@@ -3,10 +3,10 @@
 // 1 LAN + 1 WAN，仅 2.4G，4 颗指示灯（上排 WIFI/4G，下排 SYS/LINK），SIM 卡槽，1 个 reset 键
 //
 // 【重要：内存刻意不声明 memory 节点】
-// 撤掉 memory@0 = <0x0 0x8000000>（128MB）的原因：
+// 撑掉 memory@0 = <0x0 0x8000000>（128MB）的原因：
 //   原厂 SeaOS 自己报 MemTotal 64MB，说明 U-Boot 的 DDR 初始化只配了 64MB；
 //   内核按 DTB 拿 128MB 去用会採到未初始化的高部地址，实测一刷就起不来。
-//   不写 memory 节点时沿用目标默认 64MB（之前稳定启动的那版就是这个配置）。
+//   不写 memory 节点时沿用目标默认 64MB（之前穩定启动的那版就是这个配置）。
 //   将来实测确认 DDR 真是 128MB 且 U-Boot 已初始化，再把节点加回来。
 //
 // 【rootfs_data 也不再手动声明】
@@ -63,8 +63,8 @@
 			linux,default-trigger = "netdev";
 		};
 
-		/* GPIO31：实测该引脚即为期望的 wifi 指示 */
-		led-wifi: led-wifi {
+		/* GPIO31：实测该引脚即为期望的 wifi 指示（label 不能用连字符，故不设 label） */
+		led-wifi {
 			function = LED_FUNCTION_WLAN;
 			color = <LED_COLOR_ID_GREEN>;
 			gpios = <&gpio1 7 GPIO_ACTIVE_LOW>;
@@ -188,7 +188,7 @@
  * 方案B：SoC 硬件看门狗（rt2880_wdt）保持 enabled，不再用 disabled 去躲。
  * 喂狗整改由 patches/rt2880-wdt-fix-ping.patch 在编译期打进内核：ping 时同时
  *   ① 写 TMR1LOAD；
- *   ② 写 TMRSTAT 的 TMR1RST 重装位（0x100 需单独映射）；
+ *   ② 写 TMRSTAT 的 TMR1RST 重装位（0x100 与 0x120 同页，用负偏移访问）；
  *   ③ 重写带 ENABLE 的 TMR1CTL。
  * 三套重装机制只要一个生效就不会再复位；同时 probe 会打印 TMR1CTL / TMRSTAT /
  * SYSC_RSTSTAT，用于判定计数器是否被 bootloader 提前武装、上一次复位是不是看门狗所致。
