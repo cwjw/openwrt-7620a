@@ -1,23 +1,53 @@
 #!/bin/sh
 #
-# 【排障期专用】开机取证脚本，定案后整份删除即可
-# 1) 每次开机把 uptime 与看门狗/版本相关日志追加到 /root/diag/boot.log
-# 2) 后台**每秒**一次：把 uptime + loadavg + dmesg 尾部原子落到 /root/diag/last.log
-#    （先写 tmp.log 再 mv，重启后文件永远是完整的“临终遗言”，不会半截）
-# 3) 另外每 5 秒往 /root/diag/up.log 记一行时间序列，自限长 200 行
+# 【排障期专用】开机取证 + SoC 寄存器直读（定案后整份删除即可）
+# 1) 每次开机把 uptime、复位原由寄存器、看门狗相关日志追加到 /root/diag/boot.log
+# 2) 后台每秒：uptime + loadavg + SoC 定时器/复位寄存器 + dmesg 尾部，
+#    先写 tmp.log 再 mv 成 last.log（重启后永远是完整的“临终遗言”）
+# 3) 每 5 秒往 /root/diag/up.log 记一行时间序列，自限长 200 行
+# 4) 生成 /root/diag/regs.sh，随时手动读一次寄存器
 #
-# 判读：重启后看 last.log 第一条 ### up=xxxx
-#   - 若 up 之后紧跟着 panic / Oops / Call Trace → 内核崩了
-#   - 若 up 之后干净如常，且 up 值卡在 160~175 → 硬件级硬复位
+# 判读（重启后）：
+#   last.log 首行 up 值：卡在 160~175 → 时间型硬复位
+#   首行里的 t1l 若在死前一路递减 → SoC 里有个隐藏计数器在倒数（有源头可查）
+#   t1l 恒定不动 → 定时器组与此无关，复位来自定时器以外的复位源
+#   rst 里 bit1(WDT_RST_CAUSE) 置位 → 上一次复位来自看门狗
 
 D=/root/diag
 mkdir -p $D
 W=/sys/class/watchdog/watchdog0
 
+# 物理地址（MT7620A，SYSC 基址 0x10000000）
+#  0x38 复位状态 RSTSTAT（跨复位保留，是“上一次谁按的复位”唯一证据）
+#  0x100 定时器状态 TMRSTAT   0x110/0x118 TMR0   0x120/0x128 TMR1
+REG_RST=0x10000038
+REG_TSTAT=0x10000100
+REG_T0L=0x10000110
+REG_T1L=0x10000120
+REG_T1C=0x10000128
+
+reg() { devmem "$1" 32 2>/dev/null; }
+
+cat > $D/regs.sh <<'EORS'
+#!/bin/sh
+# 手动读一次 SoC 关键寄存器
+reg() { devmem "$1" 32 2>/dev/null || echo "no-devmem"; }
+echo "RSTSTAT  $(reg 0x10000038)"
+echo "TMRSTAT  $(reg 0x10000100)"
+echo "TMR0LOAD $(reg 0x10000110)"
+echo "TMR0CTL  $(reg 0x10000118)"
+echo "TMR1LOAD $(reg 0x10000120)"
+echo "TMR1CTL  $(reg 0x10000128)"
+EORS
+chmod +x $D/regs.sh 2>/dev/null
+
 {
 	echo "=== boot $(date 2>/dev/null) up=$(cut -d' ' -f1 /proc/uptime)"
-	dmesg 2>/dev/null | grep -iE "rt2880_wdt|watchdog|Linux version|Memory:" | head -8
+	echo "--- devmem: $(command -v devmem >/dev/null 2>&1 && echo yes || echo NO)"
+	echo "--- RSTSTAT=$(reg $REG_RST) TMRSTAT=$(reg $REG_TSTAT)"
+	echo "--- TMR0LOAD=$(reg $REG_T0L) TMR1LOAD=$(reg $REG_T1L) TMR1CTL=$(reg $REG_T1C)"
 	echo "--- wdt sysfs: $(ls $W 2>/dev/null | tr '\n' ' ')"
+	dmesg 2>/dev/null | grep -iE "rt2880_wdt|watchdog|Reboot|reset|Linux version|Memory:" | head -12
 } >> $D/boot.log
 
 (
@@ -25,13 +55,13 @@ W=/sys/class/watchdog/watchdog0
 	while :; do
 		U=$(cut -d' ' -f1 /proc/uptime)
 		{
-			echo "### up=$U load=$(cut -d' ' -f1-3 /proc/loadavg) wdt=$(cat $W/state 2>/dev/null || echo none)"
+			echo "### up=$U load=$(cut -d' ' -f1-3 /proc/loadavg) wdt=$(cat $W/state 2>/dev/null || echo none) rst=$(reg $REG_RST) tstat=$(reg $REG_TSTAT) t0l=$(reg $REG_T0L) t1l=$(reg $REG_T1L) t1c=$(reg $REG_T1C)"
 			dmesg 2>/dev/null | tail -n 60
 		} > $D/tmp.log 2>/dev/null
 		mv $D/tmp.log $D/last.log 2>/dev/null
 		n=$((n + 1))
 		if [ $((n % 5)) -eq 0 ]; then
-			echo "$(date +%s 2>/dev/null) up=$U left=$(cat $W/timeleft 2>/dev/null || echo none)" >> $D/up.log
+			echo "up=$U rst=$(reg $REG_RST) t1l=$(reg $REG_T1L) t1c=$(reg $REG_T1C)" >> $D/up.log
 			tail -n 200 $D/up.log > $D/up.tmp 2>/dev/null && mv $D/up.tmp $D/up.log
 		fi
 		sync 2>/dev/null
