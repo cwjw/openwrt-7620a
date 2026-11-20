@@ -34,7 +34,10 @@ env:
   REPO_BRANCH: ${{ github.event.inputs.branch || inputs.branch || 'openwrt-24.10' }}
   TZ: Asia/Shanghai
   DEVICE_ID: 7620a_cpe-16m
-  FACTORY_SIZE: '11534336'
+  # 原厂 tx20-stock-firmware.bin 的实际字节数 = 0xAC0000 = 11272192，
+  # 与 DTS 里 firmware 分区 0x50000+0xAC0000 等长。以前用 11534336 会让镜像
+  # 尾部越过分区 0x40000，写穿到原厂 jffs2 起点 0xB10000，本版收回。
+  FACTORY_SIZE: '11272192'
 
 jobs:
   build:
@@ -97,9 +100,6 @@ jobs:
           make defconfig 2>&1 | tee /tmp/defconfig.log
 
           # 上游 "Target Profile" 是 kconfig choice，一个构建只能选一个板型。
-          # 种子配置里若出现两条 CONFIG_TARGET_<target>_DEVICE_*=y，后一条会覆盖前一条，
-          # defconfig 会打印 "warning: override: ... changes choice state"，
-          # 结果就是自建板型被静默丢掉（Run #4 只出 evb 产物的根因）。
           if grep -q 'changes choice state' /tmp/defconfig.log; then
             echo "::error::种子配置里有多个板型 =y，kconfig choice 互相覆盖"
             grep 'changes choice state' /tmp/defconfig.log || true
@@ -146,6 +146,14 @@ jobs:
             || { echo "::error::DTS 未禁用 watchdog，本版会武装硬件看门狗"; exit 1; }
           echo "==> 方案C 校验通过（看门狗不会武装）"
 
+          echo "=== 对齐原厂校验：cmdline 必须带 clk_ignore_unused ==="
+          grep -q 'clk_ignore_unused' "target/linux/ramips/dts/mt7620a_${DEVICE_ID}.dts" \
+            || { echo "::error::bootargs 未加 clk_ignore_unused，内核会关掉未使用时钟（原厂不关）"; exit 1; }
+
+          echo "=== 镜像尺寸必须等于原厂 0xAC0000 ==="
+          grep -q 'pad-to 11272192' target/linux/ramips/image/mt7620.mk \
+            || { echo "::error::镜像未 pad-to 11272192（0xAC0000）"; exit 1; }
+
           echo "=== board.d 网络脚本 ==="
           ls -l files/etc/board.d/ || { echo "::error::board.d 未注入"; exit 1; }
           grep -q 'ucidef_add_switch' files/etc/board.d/02_network_sl-ir4 \
@@ -163,15 +171,11 @@ jobs:
       - name: 编译固件
         run: |
           cd openwrt
-          # 必须开 pipefail，否则 `make | tee` 会把 make 的失败吞掉，
-          # 表现为“构建成功但产物不全”（Run #4 就是这样被掩盖的）。
           set -o pipefail
           if make -j$(nproc) 2>&1 | tee build.log; then
             exit 0
           fi
           echo "::warning::首次构建失败，重跑详细日志以定位真正的错误行"
-          # 非 verbose 日志只到顶层目标行，看不出内核子构建的具体错误；
-          # 这里用 -j1 V=s 复用已编译对象，只补跑失败的那部分。
           make -j1 V=s 2>&1 | tee build-detail.log || true
           echo "===== 错误摘要（error / Error） ====="
           grep -n -iE "error:|Error [0-9]|fatal error|undefined reference|No rule to make target" build-detail.log | tail -n 80 || true
@@ -195,7 +199,7 @@ jobs:
           SZ=$(stat -c %s "$FACTORY")
           echo "factory.bin = $FACTORY ($SZ bytes)"
           if [ "$SZ" != "${FACTORY_SIZE}" ]; then
-            echo "::error::factory.bin 尺寸 $SZ ≠ ${FACTORY_SIZE}，原厂 web 升级会拒收"
+            echo "::error::factory.bin 尺寸 $SZ ≠ ${FACTORY_SIZE}（原厂 0xAC0000），与分区不等长"
             exit 1
           fi
 
@@ -204,6 +208,7 @@ jobs:
             echo "::error::未生成 ${DEVICE_ID}-squashfs-sysupgrade.bin"
             exit 1
           fi
+          echo "sysupgrade.bin = $SYSUP ($(stat -c %s "$SYSUP") bytes)"
 
       - name: 收集固件
         if: success()
