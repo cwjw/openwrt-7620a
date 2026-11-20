@@ -42,12 +42,13 @@ fi
 
 # ---------------------------------------------------------------------------
 # busybox devmem：排障期用来从用户空间直读 SoC 寄存器（/dev/mem + mmap，零额外包）
-# 注意两个 kconfig 事实（已在源码树核实）：
+# 已在源码树核实两个 kconfig 事实：
 #   1. 符号名是 CONFIG_BUSYBOX_CONFIG_DEVMEM（不是 CONFIG_DEVMEM）；
 #   2. 它只在 CONFIG_BUSYBOX_CUSTOM=y 时可见（busybox Makefile 里
 #      BUSYBOX_SYM=$(if $(CONFIG_BUSYBOX_CUSTOM),CONFIG,DEFAULT)）。
 #   打开 CUSTOM 只会把其余 applet 拉回各自的 BUSYBOX_DEFAULT_* 默认值，
 #   与当前镜像行为一致，不会增减其他命令。
+# 注意：本脚本在 make defconfig 之后运行，所以这里的修改不会被 defconfig 冲掉。
 # ---------------------------------------------------------------------------
 echo "==> 打开 busybox devmem（读 SoC 寄存器用）"
 sed -i '/^# CONFIG_BUSYBOX_CONFIG_DEVMEM is not set/d;/^CONFIG_BUSYBOX_CONFIG_DEVMEM=/d' .config
@@ -55,9 +56,9 @@ grep -q '^CONFIG_BUSYBOX_CUSTOM=y' .config || echo 'CONFIG_BUSYBOX_CUSTOM=y' >> 
 echo 'CONFIG_BUSYBOX_CONFIG_DEVMEM=y' >> .config
 grep -q '^CONFIG_BUSYBOX_CUSTOM=y' .config || { echo '!! BUSYBOX_CUSTOM 未写入'; exit 1; }
 grep -q '^CONFIG_BUSYBOX_CONFIG_DEVMEM=y' .config || { echo '!! DEVMEM 未写入'; exit 1; }
-# 让 kconfig 真正收敛一次（不会改动已显式设置的项），并回读确认没被默认值冲掉
-yes '' | ./scripts/config --file .config -e BUSYBOX_CUSTOM 2>/dev/null || true
-grep -q '^CONFIG_BUSYBOX_CONFIG_DEVMEM=y' .config || { echo '!! DEVMEM 被 kconfig 否决'; exit 1; }
+# 确认内核侧 /dev/mem 可用（MIPS 没有 STRICT_DEVMEM 这道锁）
+grep -q '^CONFIG_DEVMEM=y' target/linux/ramips/mt7620/config-6.6 2>/dev/null \
+  || echo 'CONFIG_DEVMEM=y' >> target/linux/ramips/mt7620/config-6.6
 
 echo "==> 写入固件标识"
 echo "MT7620A custom build / $(date '+%Y-%m-%d %H:%M') / branch $(git -C . rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)" \
