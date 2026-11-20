@@ -1,10 +1,14 @@
 #!/bin/sh
 #
 # 【排障期专用】开机取证脚本，定案后整份删除即可
-# 1) 每次开机把 uptime 与看门狗驱动的那行日志追加到 /root/diag/boot.log
-# 2) 后台每 10 秒记一次：uptime / 看门狗 state / timeleft / timeout / loadavg
-#    同时把最近的 dmesg 快照到 /root/diag/last-dmesg.log（重启后仍在，等于“临终遗言”）
-# 3) 日志自限长 200 行，不会把 flash 写满
+# 1) 每次开机把 uptime 与看门狗/版本相关日志追加到 /root/diag/boot.log
+# 2) 后台**每秒**一次：把 uptime + loadavg + dmesg 尾部原子落到 /root/diag/last.log
+#    （先写 tmp.log 再 mv，重启后文件永远是完整的“临终遗言”，不会半截）
+# 3) 另外每 5 秒往 /root/diag/up.log 记一行时间序列，自限长 200 行
+#
+# 判读：重启后看 last.log 第一条 ### up=xxxx
+#   - 若 up 之后紧跟着 panic / Oops / Call Trace → 内核崩了
+#   - 若 up 之后干净如常，且 up 值卡在 160~175 → 硬件级硬复位
 
 D=/root/diag
 mkdir -p $D
@@ -12,15 +16,26 @@ W=/sys/class/watchdog/watchdog0
 
 {
 	echo "=== boot $(date 2>/dev/null) up=$(cut -d' ' -f1 /proc/uptime)"
-	dmesg 2>/dev/null | grep -iE "rt2880_wdt|Linux version|Memory:" | head -5
+	dmesg 2>/dev/null | grep -iE "rt2880_wdt|watchdog|Linux version|Memory:" | head -8
+	echo "--- wdt sysfs: $(ls $W 2>/dev/null | tr '\n' ' ')"
 } >> $D/boot.log
 
 (
+	n=0
 	while :; do
-		echo "$(date +%s) up=$(cut -d' ' -f1 /proc/uptime) state=$(cat $W/state 2>/dev/null) left=$(cat $W/timeleft 2>/dev/null) to=$(cat $W/timeout 2>/dev/null) load=$(cut -d' ' -f1-3 /proc/loadavg)" >> $D/up.log
-		tail -n 200 $D/up.log > $D/up.tmp 2>/dev/null && mv $D/up.tmp $D/up.log
-		dmesg 2>/dev/null | tail -n 200 > $D/last-dmesg.log
-		sleep 10
+		U=$(cut -d' ' -f1 /proc/uptime)
+		{
+			echo "### up=$U load=$(cut -d' ' -f1-3 /proc/loadavg) wdt=$(cat $W/state 2>/dev/null || echo none)"
+			dmesg 2>/dev/null | tail -n 60
+		} > $D/tmp.log 2>/dev/null
+		mv $D/tmp.log $D/last.log 2>/dev/null
+		n=$((n + 1))
+		if [ $((n % 5)) -eq 0 ]; then
+			echo "$(date +%s 2>/dev/null) up=$U left=$(cat $W/timeleft 2>/dev/null || echo none)" >> $D/up.log
+			tail -n 200 $D/up.log > $D/up.tmp 2>/dev/null && mv $D/up.tmp $D/up.log
+		fi
+		sync 2>/dev/null
+		sleep 1
 	done
 ) >/dev/null 2>&1 &
 
