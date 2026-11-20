@@ -1,5 +1,5 @@
 # 构建开关：本文件被修改并 push 到 main，auto.yml 就会自动复调用 build.yml 开始云编译。
 # 以后要重新构建（比如改了 DTS/patch/files/scripts），只需把最后一行改成新的时间戳，不用去 Actions 页面点按钮。
 
-plan: C  (DTS 禁用 rt2880_wdt + rc.local 1 秒原子取证)
-build: 2026-11-20T15:24Z  # <- 改这行即触发
+plan: D  (方案C + LED 修正(31=4G/33=WIFI) + busybox devmem + rc.local 直读 RSTSTAT/TMR0/TMR1)
+build: 2026-11-20T17:05Z  # <- 改这行即触发
