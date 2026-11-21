@@ -13,11 +13,10 @@ DTS=target/linux/ramips/dts/mt7620a_7620a_cpe-16m.dts
 # ---------------------------------------------------------------------------
 # 差异修正 1：时钟门控。
 # 原厂 3.10.14 SDK 内核里根本没有 common clock framework（对 vmlinux 字符串扫描
-# “clk_”“Disabling unused clocks”“clk_” 均为 0 命中），所有外设时钟开机后一直
-# 保持开启；而 mainline 6.6 在启动末尾会执行 clk_disable_unused()，把没人显式
-# 持有的时钟全部关掉（我们的启动日志第 100 行就是 “clk: Disabling unused clocks”）。
-# 这是二者在硬件电源/时钟域上的头号差异，先用 clk_ignore_unused 把行为对齐成
-# “一律不关时钟”，与原厂保持一致。
+# “clk_”“Disabling unused clocks”均为 0 命中），所有外设时钟开机后一直保持开启；
+# 而 mainline 6.6 在启动末尾会执行 clk_disable_unused()，把没人显式持有的时钟
+# 全部关掉（我们启动日志第 100 行就是 “clk: Disabling unused clocks”）。
+# 这是二者在硬件时钟域上的头号差异，先用 clk_ignore_unused 对齐成“一律不关时钟”。
 # ---------------------------------------------------------------------------
 echo "==> 对齐原厂：cmdline 加 clk_ignore_unused（禁止内核关闭未使用时钟）"
 if ! grep -q 'clk_ignore_unused' "$DTS"; then
@@ -51,9 +50,14 @@ if ! grep -A3 '&watchdog {' "$DTS" | grep -q 'disabled'; then
 fi
 
 # ---------------------------------------------------------------------------
-# 内核调试开关：CONFIG_WATCHDOG_SYSFS（排障预留）、CONFIG_GPIO_SYSFS（现场试灯）
+# 内核调车开关
+#   CONFIG_WATCHDOG_SYSFS / CONFIG_GPIO_SYSFS：排障预留、现场试灯
+#   CONFIG_DEVMEM：busybox devmem 打开的是 /dev/mem，这个设备节点由内核决定。
+#     实测 E 版（只有 busybox applet、没有内核开关）直报
+#     “ls: /dev/mem: No such file or directory” → devmem 完全不可用。
+#     所以必须在内核配置里显式打开，并关掉 STRICT_DEVMEM 限制。
 # ---------------------------------------------------------------------------
-echo "==> 打开 CONFIG_WATCHDOG_SYSFS / CONFIG_GPIO_SYSFS"
+echo "==> 打开 CONFIG_WATCHDOG_SYSFS / CONFIG_GPIO_SYSFS / CONFIG_DEVMEM"
 KCFG=target/linux/ramips/mt7620/config-6.6
 for opt in CONFIG_WATCHDOG_SYSFS CONFIG_GPIO_SYSFS; do
 	if grep -q "$opt" "$KCFG"; then
@@ -64,13 +68,27 @@ for opt in CONFIG_WATCHDOG_SYSFS CONFIG_GPIO_SYSFS; do
 	grep -qx "$opt=y" "$KCFG" || { echo "!! $opt 未写入"; exit 1; }
 done
 
+# CONFIG_DEVMEM=y（仅精确匹配本符号，不会误伤 CONFIG_STRICT_DEVMEM）
+if grep -qxE 'CONFIG_DEVMEM=.*|# CONFIG_DEVMEM is not set' "$KCFG"; then
+	sed -i -e 's/^# CONFIG_DEVMEM is not set$/CONFIG_DEVMEM=y/' -e 's/^CONFIG_DEVMEM=.*/CONFIG_DEVMEM=y/' "$KCFG"
+else
+	echo 'CONFIG_DEVMEM=y' >> "$KCFG"
+fi
+grep -qx 'CONFIG_DEVMEM=y' "$KCFG" || { echo '!! CONFIG_DEVMEM 未写入'; exit 1; }
+
+# 关闭 STRICT_DEVMEM（否则 I/O 区以外的访问会被拦）
+if grep -qxE 'CONFIG_STRICT_DEVMEM=.*|# CONFIG_STRICT_DEVMEM is not set' "$KCFG"; then
+	sed -i -e 's/^CONFIG_STRICT_DEVMEM=.*/# CONFIG_STRICT_DEVMEM is not set/' "$KCFG"
+else
+	echo '# CONFIG_STRICT_DEVMEM is not set' >> "$KCFG"
+fi
+grep -qx '# CONFIG_STRICT_DEVMEM is not set' "$KCFG" || { echo '!! STRICT_DEVMEM 未关闭'; exit 1; }
+
 # ---------------------------------------------------------------------------
 # 差异修正 2：镜像尺寸精确等于原厂 firmware 分区。
-# 原厂镜像 tx20-stock-firmware.bin = 11,272,192 B = 0xAC0000，与分区
-# firmware 0x50000 +0xAC0000 完全相等，不多一个字节。
-# 之前用 pad-to 11534336(0xB00000) 会让镜像尾部越过分区边界 0x40000，
-# 在 U-Boot web 升级时会写进原厂 jffs2 的起点 0xB10000——这是与原厂的
-# 真实差异，本版收回到 0xAC0000。
+# 原厂镜像 11,272,192 B = 0xAC0000，与分区 firmware 0x50000+0xAC0000 完全相等。
+# 之前用 pad-to 11534336(0xB00000) 会让镜像尾部越过分区边界，写进原厂 jffs2
+# 起点 0xB10000——这是真实差异，本版收回到 0xAC0000。
 # ---------------------------------------------------------------------------
 echo "==> 追加镜像定义到 ramips/mt7620（尺寸对齐原厂 0xAC0000）"
 MK=target/linux/ramips/image/mt7620.mk
@@ -104,7 +122,7 @@ EOF
 fi
 grep -q 'define Device/7620a_cpe-16m' "$MK" || { echo '!! mt7620.mk 追加失败'; exit 1; }
 grep -q 'TARGET_DEVICES += 7620a_cpe-16m' "$MK" || { echo '!! TARGET_DEVICES 未登记'; exit 1; }
-grep -q 'pad-to 11272192' "$MK" || { echo '!! 镜潠尺寸未改成 0xAC0000'; exit 1; }
+grep -q 'pad-to 11272192' "$MK" || { echo '!! 镜像尺寸未改成 0xAC0000'; exit 1; }
 
 echo "==> feeds update"
 ./scripts/feeds update -a
