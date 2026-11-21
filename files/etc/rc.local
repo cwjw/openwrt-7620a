@@ -1,26 +1,36 @@
 #!/bin/sh
 #
-# 照抄原厂行为：武装硬件看门狗，并每 5 秒喂一次。
-#   原厂 /etc/init.d/done:58 → `watchdog -T /dev/watchdog -s 5`
-#   我们之前把驱动禁掉、也没人 open /dev/watchdog，等于“狗饿着”，到点就吸人。
-#
-# 关键：必须长期持有 /dev/watchdog 的 fd。
-#   如果每次 `echo X > /dev/watchdog` 后就关闭，驱动会在 close 时 disarm，
-#   变成“开了又关”，跟没开一样。所以用 exec 3> 把 fd 一直拿着。
+# 两件事，均照原厂：
+#  A) 硬件看门狗：武装 + 每 5 秒喂一次
+#     原厂 /etc/init.d/done:58 → `watchdog -T /dev/watchdog -s 5`
+#     必须长持有 fd；每次写完就 close 会让驱动 disarm，等于没开。
+#  B) 面板灯：用脚本点灯
+#     原厂不是用内核 trigger，而是 /etc/status/*.sh 里 sealed <gpio> on/off：
+#       GPIO30 LINK、 GPIO31 4G、 GPIO32 SYS、 GPIO33 WIFI
+#     之前 WIFI 灯挂了 phy0tpt（没流量就不亮）、4G 灯写死 default-state=off
+#     且无人驱动 —— 所以两颗灯根本不亮。
 #
 # 验证：
-#   cat /tmp/wdog.log     能看到每秒 5 秒一条 feed 记录
-#   ls -l /dev/watchdog    应存在
-#   uptime 能跑过 200 秒    就说明不会再自动重启
+#   cat /tmp/wdog.log      每 5 秒一条 feed OK
+#   cat /tmp/led.log       每 5 秒一条 wifi/4g 决策
+#   uptime 跑过 200 秒      不再重启
 #
 
+LED_W=/sys/class/leds/green:wlan/brightness
+LED_WT=/sys/class/leds/green:wlan/trigger
+LED_R=/sys/class/leds/4g/brightness
+
+# WIFI 灯放下内核 trigger 控制，改由脚本管
+[ -w "$LED_WT" ] && echo none > "$LED_WT" 2>/dev/null
+
+# ---------- A) 看门狗喂狗 ----------
 (
 	exec 3>/dev/watchdog 2>/dev/null
 	if [ $? -ne 0 ]; then
-		echo "FAIL: 无法打开 /dev/watchdog（驱动未加载或节点不存在）" > /tmp/wdog.log
+		echo "FAIL 无法打开 /dev/watchdog" > /tmp/wdog.log
 		exit 0
 	fi
-	echo "open /dev/watchdog OK at up=$(cut -d' ' -f1 /proc/uptime)" > /tmp/wdog.log
+	echo "open OK up=$(cut -d' ' -f1 /proc/uptime)" > /tmp/wdog.log
 	while :; do
 		up=$(cut -d' ' -f1 /proc/uptime)
 		if printf 'X' >&3 2>/dev/null; then
@@ -28,6 +38,25 @@
 		else
 			echo "up=$up feed FAIL" >> /tmp/wdog.log
 		fi
+		sleep 5
+	done
+) >/dev/null 2>&1 &
+
+# ---------- B) 面板灯 ----------
+(
+	while :; do
+		w=0 ; r=0
+		# WIFI：有无线 phy 且 hostapd 在跑 → 亮
+		if [ -d /sys/class/ieee80211/phy0 ]; then
+			if pidof hostapd >/dev/null 2>&1; then w=1; fi
+			if grep -q up /sys/class/net/phy0-ap0/operstate 2>/dev/null; then w=1; fi
+		fi
+		# 4G：QMI 串备节点存在（EC20 已枚举）→ 亮
+		if ls /dev/cdc-wdm* >/dev/null 2>&1; then r=1; fi
+		if [ -d /sys/class/net/wwan0 ]; then r=1; fi
+		[ -w "$LED_W" ] && echo $w > "$LED_W" 2>/dev/null
+		[ -w "$LED_R" ] && echo $r > "$LED_R" 2>/dev/null
+		echo "up=$(cut -d' ' -f1 /proc/uptime) wifi=$w 4g=$r" >> /tmp/led.log
 		sleep 5
 	done
 ) >/dev/null 2>&1 &
