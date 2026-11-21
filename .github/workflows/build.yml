@@ -27,15 +27,27 @@ on:
     tags:
       - 'v*'
 
+# 同一分义只保留最新一次构建：重复触发会直接干掉旧的，不浪费排队时间。
+concurrency:
+  group: build-mt7620a-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt
   REPO_BRANCH: ${{ github.event.inputs.branch || inputs.branch || 'openwrt-24.10' }}
   TZ: Asia/Shanghai
   DEVICE_ID: 7620a_cpe-16m
+  # 缓存版本号：怀疑工具链缓存带脏导致诡异编译错误时，把这里 +1 即可整体失效。
+  CACHE_VER: v2
   # 原厂 tx20-stock-firmware.bin = 11272192 B = 0xAC0000，与 DTS 的
   # firmware 分区 0x50000+0xAC0000 等长。以前用 11534336 会让镜像尾部越过
   # 分区 0x40000、写穿到原厂 jffs2 起点 0xB10000，本版已收回。
   FACTORY_SIZE: '11272192'
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_COMPRESS: 'true'
+  CCACHE_COMPRESSLEVEL: '6'
+  CCACHE_MAXSIZE: '1G'
+  CCACHE_BASEDIR: ${{ github.workspace }}
 
 jobs:
   build:
@@ -48,7 +60,10 @@ jobs:
 
     steps:
       - name: 检出构建配置
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
+
+      - name: 开表计时
+        run: echo "BUILD_START=$(date +%s)" >> $GITHUB_ENV
 
       - name: 释放磁盘空间
         uses: jlumbroso/free-disk-space@main
@@ -57,23 +72,18 @@ jobs:
           docker-images: true
           swap-storage: false
 
-      - name: 安装编译依赖
+      - name: 安装编译依赖（含 ccache）
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
             gettext git libncurses-dev libssl-dev python3 python3-setuptools \
             python3-pip python3-ply rsync unzip zlib1g-dev file wget qemu-utils ccache
-          sudo timedatectl set-timezone Asia/Shanghai || true
-          echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
-
-      - name: 缓存 ccache
-        uses: actions/cache@v5
-        with:
-          path: ~/.ccache
-          key: ccache-${{ env.REPO_BRANCH }}-${{ github.run_id }}
-          restore-keys: |
-            ccache-${{ env.REPO_BRANCH }}-
+          ccache --version | head -1
+          ccache --max-size=${{ env.CCACHE_MAXSIZE }}
+          ccache -z
+          nproc | xargs -I{} echo "CPU 核数: {}"
+          df -h / | tail -1
 
       - name: 克隆源码
         run: |
@@ -81,16 +91,54 @@ jobs:
           git clone --depth=1 --single-branch -b "${{ env.REPO_BRANCH }}" "${{ env.REPO_URL }}" openwrt
           cd openwrt && git log -1 --pretty=format:'源码版本: %h %s%n'
 
-      - name: 缓存下载目录（克隆之后再恢复）
-        uses: actions/cache@v5
+      # ------------------------------------------------------------------
+      # 三级缓存。云编译的耗时大头依次是：
+      #   ① 下载依赖包（约 10~15 分钟）
+      #   ② 编工具链 + host 工具（约 15~25 分钟）
+      #   ③ 编软件包（约 20~30 分钟，ccache 能把这块砍一半以上）
+      # 前两项用 actions/cache 整块搬运，第三项靠 ccache。
+      # 注意：必须在 clone 之后恢复，否则路径不存在。
+      # ------------------------------------------------------------------
+      - name: 恢复下载缓存 dl/（关键 key 随配置变化，带前缀回退）
+        uses: actions/cache/restore@v4
         with:
           path: openwrt/dl
-          key: dl-${{ env.REPO_BRANCH }}-${{ hashFiles('configs/*.config') }}
+          key: dl-${{ env.CACHE_VER }}-${{ env.REPO_BRANCH }}-${{ hashFiles('configs/*.config') }}
           restore-keys: |
-            dl-${{ env.REPO_BRANCH }}-
+            dl-${{ env.CACHE_VER }}-${{ env.REPO_BRANCH }}-
+            dl-
+
+      - name: 恢复工具链 / host 工具缓存（精确 key，配置一改就重建）
+        id: tc-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            openwrt/staging_dir/host
+            openwrt/staging_dir/toolchain-*
+            openwrt/build_dir/host
+            openwrt/build_dir/toolchain-*
+          # 故意不加 restore-keys：工具链缓存不完整/过期会直接报神秘编译错误，
+          # 宁可重建也不吃一份错位的 staging_dir。
+          key: tc-${{ env.CACHE_VER }}-${{ runner.os }}-${{ hashFiles('configs/mt7620a-16m.config') }}
+
+      - name: 恢复 ccache 缓存
+        uses: actions/cache/restore@v4
+        with:
+          path: .ccache
+          key: ccache-${{ env.CACHE_VER }}-${{ env.REPO_BRANCH }}-${{ hashFiles('configs/*.config') }}
+          restore-keys: |
+            ccache-${{ env.CACHE_VER }}-${{ env.REPO_BRANCH }}-
+            ccache-
+
+      - name: 确认缓存状态
+        run: |
+          echo "工具链缓存命中: ${{ steps.tc-cache.outputs.cache-hit }}"
+          du -sh openwrt/dl 2>/dev/null || echo "dl: 空"
+          du -sh openwrt/staging_dir/toolchain-* 2>/dev/null || echo "toolchain: 空"
+          du -sh .ccache 2>/dev/null || echo "ccache: 空"
 
       - name: 加载 feeds 与种子配置（第一步）
-        timeout-minutes: 30
+        timeout-minutes: 40
         run: |
           cd openwrt
           cp ../configs/mt7620a-16m.config .config
@@ -115,7 +163,13 @@ jobs:
             exit 1
           fi
 
-          echo "==> 板型与 rootfs 类型校验通过"
+          # 加速核心：没开 CCACHE 就相当于 cach 一点没命中，直接判失败。
+          if ! grep -qx 'CONFIG_CCACHE=y' .config; then
+            echo "::error::CONFIG_CCACHE 未生效，本次构建不会走 ccache"
+            exit 1
+          fi
+
+          echo "==> 板型 / rootfs 类型 / ccache 校验通过"
 
       - name: 注入自定义内容（第二步）
         run: |
@@ -160,15 +214,15 @@ jobs:
           grep -E "CONFIG_PACKAGE_(luci|ttyd|htop|uqmi|usb-modeswitch)=" .config | head -20
           grep -E "CONFIG_PACKAGE_(kmod-usb-net-qmi-wwan|kmod-usb-serial-option|swconfig|kmod-rt2800-soc)=" .config
 
-      - name: 下载源码包
+      - name: 下载源码包（并行 + 单一源回退）
         timeout-minutes: 40
         run: |
           set -o pipefail
           cd openwrt
-          timeout 35m make -j$(nproc) download < /dev/null 2>&1 | tee download.log \
+          timeout 30m make -j$(nproc) download < /dev/null 2>&1 | tee download.log \
             || timeout 30m make -j1 V=s download < /dev/null 2>&1 | tee download-detail.log
 
-      - name: 编译固件
+      - name: 编译固件（并行 + ccache）
         timeout-minutes: 110
         run: |
           set -o pipefail
@@ -176,9 +230,20 @@ jobs:
           # < /dev/null 是关键：任何 kconfig/脚本想读标准输入就会立即 EOF，
           # 不会像 Plan E 那样静默卡死到 6 小时超时。
           if timeout 100m make -j$(nproc) < /dev/null 2>&1 | tee build.log; then
-            exit 0
+            STATUS=0
+          else
+            STATUS=1
           fi
+          # 无论成败都把 ccache 命中和编译耗时打出来
+          echo "===== ccache 统计 ====="
+          ccache -s || true
+          echo "===== 编译耗时 ====="
+          echo "共用时 $(( ($(date +%s) - BUILD_START) / 60 )) 分钟"
+          if [ $STATUS -eq 0 ]; then exit 0; fi
           echo "::warning::首次构建失败或被 timeout 终止，重跑详细日志定位真正的错误行"
+          if [ "${{ steps.tc-cache.outputs.cache-hit }}" = "true" ]; then
+            echo "::warning::本次命中了工具链缓存，若报错诡异，请把 workflow 里 CACHE_VER 加 1 后重跑"
+          fi
           timeout 40m make -j1 V=s < /dev/null 2>&1 | tee build-detail.log || true
           echo "===== 错误摘要（error / Error） ====="
           grep -n -iE "error:|Error [0-9]|fatal error|undefined reference|No rule to make target|Terminated" build-detail.log | tail -n 80 || true
@@ -187,7 +252,6 @@ jobs:
           exit 1
 
       - name: 核对产物（尺寸不符直接失败）
-        if: success()
         run: |
           cd openwrt
           ls -l bin/targets/ramips/mt7620/ || true
@@ -210,7 +274,6 @@ jobs:
           echo "sysupgrade.bin = $SYSUP ($(stat -c %s "$SYSUP") bytes)"
 
       - name: 收集固件
-        if: success()
         run: |
           mkdir -p output
           find openwrt/bin/targets/ramips/mt7620 -maxdepth 1 -type f \
@@ -221,13 +284,25 @@ jobs:
           sha256sum $(ls | grep -v SHA256SUMS.txt) > SHA256SUMS.txt || true
 
       - name: 上传固件 Artifact
-        if: success()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v4
         with:
           name: mt7620a-firmware-${{ github.run_number }}
           path: output/*
           if-no-files-found: error
           retention-days: 30
+
+      - name: 回存工具链 / 下载 / ccache 缓存
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            openwrt/dl
+            openwrt/staging_dir/host
+            openwrt/staging_dir/toolchain-*
+            openwrt/build_dir/host
+            openwrt/build_dir/toolchain-*
+            .ccache
+          key: all-${{ env.CACHE_VER }}-${{ env.REPO_BRANCH }}-${{ github.run_id }}
 
       - name: 发布 Release
         if: success() && (github.event.inputs.tag != '' || inputs.tag != '' || startsWith(github.ref, 'refs/tags/'))
@@ -244,7 +319,7 @@ jobs:
 
       - name: 上传构建日志（失败时）
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v4
         with:
           name: build-log-${{ github.run_number }}
           path: |
