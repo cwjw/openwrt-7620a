@@ -1,62 +1,122 @@
 #!/bin/sh
 #
-# 两件事，均照原厂：
-#  A) 硬件看门狗：武装 + 每 5 秒喂一次
-#     原厂 /etc/init.d/done:58 → `watchdog -T /dev/watchdog -s 5`
-#     必须长持有 fd；每次写完就 close 会让驱动 disarm，等于没开。
-#  B) 面板灯：用脚本点灯
-#     原厂不是用内核 trigger，而是 /etc/status/*.sh 里 sealed <gpio> on/off：
-#       GPIO30 LINK、 GPIO31 4G、 GPIO32 SYS、 GPIO33 WIFI
-#     之前 WIFI 灯挂了 phy0tpt（没流量就不亮）、4G 灯写死 default-state=off
-#     且无人驱动 —— 所以两颗灯根本不亮。
+# 一次性做全版：看门狗 + 面板灯 + 固件自带验收，全部照原厂行为。
 #
-# 验证：
-#   cat /tmp/wdog.log      每 5 秒一条 feed OK
-#   cat /tmp/led.log       每 5 秒一条 wifi/4g 决策
-#   uptime 跑过 200 秒      不再重启
+# 一、看门狗 —— 复刻原厂 /etc/init.d/done:58 `watchdog -T /dev/watchdog -s 5`
+#     open 就是武装，之后每 5 秒 write 一字节就是喂狗。
+#     必须长持有 fd：写完就 close 会让驱动 disarm，等于没开。
+#
+# 二、面板灯 —— 复刻原厂 /etc/diag.sh 与 /etc/status/*.sh 的方式（用脚本点灯，
+#     不用内核 trigger）：
+#       GPIO32 SYS  : diag.sh done → sealed 32 "slow"    ⇒ 慢闪
+#       GPIO30 LINK : eth_led.sh   → WAN 或 LAN 任一 link up ⇒ on
+#       GPIO33      : vpn.sh/ipsec.sh → sealed 33 on/off   ⇒ VPN 状态
+#                     （面板丝印是 WIFI，本版同时并入无线状态，两者任一为真就亮）
+#       GPIO31 4G   : 原厂脚本未引用，由二进制下发；本版按 EC20 枚举状态驱动
+#
+# 三、固件自带验收 —— 结果写 flash，不再依赖那个二十秒窗口：
+#       t≈165s  写 /root/accept.txt（跑不到这一步就说明没修好）
+#       t≈200s  追加 alive@200（越过死点，问题解决）
+#     刷完后只需：cat /root/accept.txt
 #
 
-LED_W=/sys/class/leds/green:wlan/brightness
-LED_WT=/sys/class/leds/green:wlan/trigger
-LED_R=/sys/class/leds/4g/brightness
+L=/sys/class/leds
+SYS=$L/green:power/brightness
+LNK=$L/link/brightness
+WIF=$L/green:wlan/brightness
+WIFT=$L/green:wlan/trigger
+FF4=$L/4g/brightness
 
-# WIFI 灯放下内核 trigger 控制，改由脚本管
-[ -w "$LED_WT" ] && echo none > "$LED_WT" 2>/dev/null
+# 把内核 trigger 放开，改由脚本管（原厂也是脚本管）
+for t in $L/link/trigger $WIFT; do [ -w "$t" ] && echo none > "$t" 2>/dev/null; done
 
-# ---------- A) 看门狗喂狗 ----------
+# ---------- 一、喂狗 ----------
 (
 	exec 3>/dev/watchdog 2>/dev/null
 	if [ $? -ne 0 ]; then
-		echo "FAIL 无法打开 /dev/watchdog" > /tmp/wdog.log
+		echo "WDOG=OPEN_FAIL" > /tmp/wdog.log
 		exit 0
 	fi
-	echo "open OK up=$(cut -d' ' -f1 /proc/uptime)" > /tmp/wdog.log
+	echo "WDOG=OPEN_OK up=$(cut -d' ' -f1 /proc/uptime)" > /tmp/wdog.log
 	while :; do
 		up=$(cut -d' ' -f1 /proc/uptime)
 		if printf 'X' >&3 2>/dev/null; then
-			echo "up=$up feed OK" >> /tmp/wdog.log
+			echo "up=$up FEED_OK" >> /tmp/wdog.log
 		else
-			echo "up=$up feed FAIL" >> /tmp/wdog.log
+			echo "up=$up FEED_FAIL" >> /tmp/wdog.log
 		fi
 		sleep 5
 	done
 ) >/dev/null 2>&1 &
 
-# ---------- B) 面板灯 ----------
+# ---------- 二、面板灯 ----------
+# SYS 慢闪（原厂 sealed 32 "slow"）：1 秒亮 / 1 秒灭
+(
+	s=0
+	while :; do
+		s=$((1 - s))
+		[ -w "$SYS" ] && echo $s > "$SYS" 2>/dev/null
+		sleep 1
+	done
+) >/dev/null 2>&1 &
+
+# LINK / WIFI / 4G，每 2 秒根据真实状态刷新
 (
 	while :; do
-		w=0 ; r=0
-		# WIFI：有无线 phy 且 hostapd 在跑 → 亮
-		if [ -d /sys/class/ieee80211/phy0 ]; then
-			if pidof hostapd >/dev/null 2>&1; then w=1; fi
-			if grep -q up /sys/class/net/phy0-ap0/operstate 2>/dev/null; then w=1; fi
+		up=$(cut -d' ' -f1 /proc/uptime)
+		# LINK：任一以太网口 link up（复刻 eth_led.sh 的 wan+lan 逻辑）
+		l=0
+		for n in eth0.1 eth0.2 br-lan wan lan; do
+			grep -q up /sys/class/net/$n/operstate 2>/dev/null && { l=1; break; }
+		done
+		# WIFI
+		w=0
+		[ -d /sys/class/ieee80211/phy0 ] && w=1
+		pidof hostapd >/dev/null 2>&1 && w=1
+		grep -q up /sys/class/net/phy0-ap0/operstate 2>/dev/null && w=1
+		# 复刻原厂：GPIO33 同时兼作 VPN 指示
+		{ [ -e /sys/class/net/ppp0 ] || [ -e /sys/class/net/ipsec0 ]; } && w=1
+		# 4G：EC20 已枚举（QMI 节点或 usb 设备在）
+		r=0
+		ls /dev/cdc-wdm* >/dev/null 2>&1 && r=1
+		[ -d /sys/class/net/wwan0 ] && r=1
+		grep -q 2c7c /sys/kernel/debug/usb/devices 2>/dev/null && r=1
+		[ -w "$LNK" ] && echo $l > "$LNK" 2>/dev/null
+		[ -w "$WIF" ] && echo $w > "$WIF" 2>/dev/null
+		[ -w "$FF4" ] && echo $r > "$FF4" 2>/dev/null
+		echo "up=$up link=$l wifi=$w 4g=$r" >> /tmp/led.log
+		sleep 2
+	done
+) >/dev/null 2>&1 &
+
+# ---------- 三、固件自带验收（写 flash，只写两次）---------
+AC=/root/accept.txt
+(
+	while :; do
+		up=$(cut -d' ' -f1 /proc/uptime)
+		if [ "$up" -ge 165 ] && [ ! -f /tmp/.ck165 ]; then
+			{
+				echo "===== CHECKPOINT t165 ====="
+				echo "uptime=$up  load=$(cat /proc/loadavg)"
+				echo "cmdline=$(cat /proc/cmdline)"
+				echo "devmem=$(command -v devmem >/dev/null 2>&1 && echo yes || echo no)  devmem_node=$([ -c /dev/mem ] && echo yes || echo no)"
+				echo "watchdog_node=$([ -e /dev/watchdog ] && echo yes || echo no)"
+				echo "wdog_tail=$(tail -n 2 /tmp/wdog.log 2>/dev/null | tr '\n' '|')"
+				echo "t1l=$(devmem 0x10000120 32 2>/dev/null)  t1c=$(devmem 0x10000128 32 2>/dev/null)  rst=$(devmem 0x10000038 32 2>/dev/null)"
+				echo "led: sys=$(cat $SYS 2>/dev/null) link=$(cat $LNK 2>/dev/null) wifi=$(cat $WIF 2>/dev/null) 4g=$(cat $FF4 2>/dev/null)"
+				echo "ledlog=$(tail -n 2 /tmp/led.log 2>/dev/null | tr '\n' '|')"
+				echo "mtd:"; cat /proc/mtd
+			} > $AC 2>&1
+			sync
+			touch /tmp/.ck165
 		fi
-		# 4G：QMI 串备节点存在（EC20 已枚举）→ 亮
-		if ls /dev/cdc-wdm* >/dev/null 2>&1; then r=1; fi
-		if [ -d /sys/class/net/wwan0 ]; then r=1; fi
-		[ -w "$LED_W" ] && echo $w > "$LED_W" 2>/dev/null
-		[ -w "$LED_R" ] && echo $r > "$LED_R" 2>/dev/null
-		echo "up=$(cut -d' ' -f1 /proc/uptime) wifi=$w 4g=$r" >> /tmp/led.log
+		if [ "$up" -ge 200 ] && [ ! -f /tmp/.ck200 ]; then
+			echo "===== ALIVE@200 =====  uptime=$up" >> $AC
+			echo "alive: t1l=$(devmem 0x10000120 32 2>/dev/null) t1c=$(devmem 0x10000128 32 2>/dev/null)" >> $AC
+			dmesg | grep -iE 'watchdog|rt2880|rt-timer' >> $AC 2>/dev/null
+			sync
+			touch /tmp/.ck200
+		fi
 		sleep 5
 	done
 ) >/dev/null 2>&1 &
