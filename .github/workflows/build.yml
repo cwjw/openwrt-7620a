@@ -11,8 +11,6 @@ on:
         description: '构建成功后发布 Release 的 tag 名（留空只上传 Artifact）'
         required: false
         default: ''
-  # 供 auto.yml 调用：往仓库根目录的 .ci-trigger 推一行就能启动构建，
-  # 不需要人在 Actions 页面点 Run workflow。
   workflow_call:
     inputs:
       branch:
@@ -34,15 +32,17 @@ env:
   REPO_BRANCH: ${{ github.event.inputs.branch || inputs.branch || 'openwrt-24.10' }}
   TZ: Asia/Shanghai
   DEVICE_ID: 7620a_cpe-16m
-  # 原厂 tx20-stock-firmware.bin 的实际字节数 = 0xAC0000 = 11272192，
-  # 与 DTS 里 firmware 分区 0x50000+0xAC0000 等长。以前用 11534336 会让镜像
-  # 尾部越过分区 0x40000，写穿到原厂 jffs2 起点 0xB10000，本版收回。
+  # 原厂 tx20-stock-firmware.bin = 11272192 B = 0xAC0000，与 DTS 的
+  # firmware 分区 0x50000+0xAC0000 等长。以前用 11534336 会让镜像尾部越过
+  # 分区 0x40000、写穿到原厂 jffs2 起点 0xB10000，本版已收回。
   FACTORY_SIZE: '11272192'
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 360
+    # Plan E 曾卡满 6 小时（defconfig 后改 .config 导致交互式 kconfig 阻塞）。
+    # 改成 150 分钟：正常一次约 40 分钟，卡死也不会拖到天亮。
+    timeout-minutes: 150
     permissions:
       contents: write
 
@@ -53,7 +53,7 @@ jobs:
       - name: 释放磁盘空间
         uses: jlumbroso/free-disk-space@main
         with:
-          tool-cache: true
+          preinstalled-runtimes: true
           docker-images: true
           swap-storage: false
 
@@ -77,8 +77,6 @@ jobs:
 
       - name: 克隆源码
         run: |
-          # 注意：dl 缓存必须在克隆之后恢复，否则 actions/cache 会提前创建 openwrt/
-          # 目录，git clone 会以 "destination path 'openwrt' already exists" 失败（exit 128）。
           rm -rf openwrt
           git clone --depth=1 --single-branch -b "${{ env.REPO_BRANCH }}" "${{ env.REPO_URL }}" openwrt
           cd openwrt && git log -1 --pretty=format:'源码版本: %h %s%n'
@@ -92,14 +90,14 @@ jobs:
             dl-${{ env.REPO_BRANCH }}-
 
       - name: 加载 feeds 与种子配置（第一步）
+        timeout-minutes: 30
         run: |
           cd openwrt
           cp ../configs/mt7620a-16m.config .config
           if [ -f ../feeds.conf ]; then cp ../feeds.conf feeds.conf; fi
           bash ../scripts/diy-part1.sh
-          make defconfig 2>&1 | tee /tmp/defconfig.log
+          make defconfig < /dev/null 2>&1 | tee /tmp/defconfig.log
 
-          # 上游 "Target Profile" 是 kconfig choice，一个构建只能选一个板型。
           if grep -q 'changes choice state' /tmp/defconfig.log; then
             echo "::error::种子配置里有多个板型 =y，kconfig choice 互相覆盖"
             grep 'changes choice state' /tmp/defconfig.log || true
@@ -143,12 +141,11 @@ jobs:
           echo "=== 方案C 校验：DTS 里 watchdog 必须是 disabled ==="
           grep -A3 '&watchdog {' "target/linux/ramips/dts/mt7620a_${DEVICE_ID}.dts" \
             | grep -q 'disabled' \
-            || { echo "::error::DTS 未禁用 watchdog，本版会武装硬件看门狗"; exit 1; }
-          echo "==> 方案C 校验通过（看门狗不会武装）"
+            || { echo "::error::DTS 未禁用 watchdog"; exit 1; }
 
           echo "=== 对齐原厂校验：cmdline 必须带 clk_ignore_unused ==="
           grep -q 'clk_ignore_unused' "target/linux/ramips/dts/mt7620a_${DEVICE_ID}.dts" \
-            || { echo "::error::bootargs 未加 clk_ignore_unused，内核会关掉未使用时钟（原厂不关）"; exit 1; }
+            || { echo "::error::bootargs 未加 clk_ignore_unused（原厂从不关时钟）"; exit 1; }
 
           echo "=== 镜像尺寸必须等于原厂 0xAC0000 ==="
           grep -q 'pad-to 11272192' target/linux/ramips/image/mt7620.mk \
@@ -164,21 +161,27 @@ jobs:
           grep -E "CONFIG_PACKAGE_(kmod-usb-net-qmi-wwan|kmod-usb-serial-option|swconfig|kmod-rt2800-soc)=" .config
 
       - name: 下载源码包
+        timeout-minutes: 40
         run: |
+          set -o pipefail
           cd openwrt
-          make -j$(nproc) download || make -j1 V=s download
+          timeout 35m make -j$(nproc) download < /dev/null 2>&1 | tee download.log \
+            || timeout 30m make -j1 V=s download < /dev/null 2>&1 | tee download-detail.log
 
       - name: 编译固件
+        timeout-minutes: 110
         run: |
-          cd openwrt
           set -o pipefail
-          if make -j$(nproc) 2>&1 | tee build.log; then
+          cd openwrt
+          # < /dev/null 是关键：任何 kconfig/脚本想读标准输入就会立即 EOF，
+          # 不会像 Plan E 那样静默卡死到 6 小时超时。
+          if timeout 100m make -j$(nproc) < /dev/null 2>&1 | tee build.log; then
             exit 0
           fi
-          echo "::warning::首次构建失败，重跑详细日志以定位真正的错误行"
-          make -j1 V=s 2>&1 | tee build-detail.log || true
+          echo "::warning::首次构建失败或被 timeout 终止，重跑详细日志定位真正的错误行"
+          timeout 40m make -j1 V=s < /dev/null 2>&1 | tee build-detail.log || true
           echo "===== 错误摘要（error / Error） ====="
-          grep -n -iE "error:|Error [0-9]|fatal error|undefined reference|No rule to make target" build-detail.log | tail -n 80 || true
+          grep -n -iE "error:|Error [0-9]|fatal error|undefined reference|No rule to make target|Terminated" build-detail.log | tail -n 80 || true
           echo "===== 详细日志尾部 150 行 ====="
           tail -n 150 build-detail.log || true
           exit 1
@@ -188,7 +191,6 @@ jobs:
         run: |
           cd openwrt
           ls -l bin/targets/ramips/mt7620/ || true
-          echo "=== 镜像尺寸告警 ==="
           grep -i 'is too big' build.log || echo "无尺寸告警"
 
           FACTORY=$(ls bin/targets/ramips/mt7620/*"${DEVICE_ID}"-squashfs-factory.bin 2>/dev/null | head -1)
@@ -199,15 +201,12 @@ jobs:
           SZ=$(stat -c %s "$FACTORY")
           echo "factory.bin = $FACTORY ($SZ bytes)"
           if [ "$SZ" != "${FACTORY_SIZE}" ]; then
-            echo "::error::factory.bin 尺寸 $SZ ≠ ${FACTORY_SIZE}（原厂 0xAC0000），与分区不等长"
+            echo "::error::factory.bin 尺寸 $SZ ≠ ${FACTORY_SIZE}（原厂 0xAC0000）"
             exit 1
           fi
 
           SYSUP=$(ls bin/targets/ramips/mt7620/*"${DEVICE_ID}"-squashfs-sysupgrade.bin 2>/dev/null | head -1)
-          if [ -z "$SYSUP" ]; then
-            echo "::error::未生成 ${DEVICE_ID}-squashfs-sysupgrade.bin"
-            exit 1
-          fi
+          [ -n "$SYSUP" ] || { echo "::error::未生成 squashfs-sysupgrade.bin"; exit 1; }
           echo "sysupgrade.bin = $SYSUP ($(stat -c %s "$SYSUP") bytes)"
 
       - name: 收集固件
@@ -251,5 +250,7 @@ jobs:
           path: |
             openwrt/build.log
             openwrt/build-detail.log
+            openwrt/download.log
+            openwrt/download-detail.log
             /tmp/defconfig.log
           if-no-files-found: ignore
