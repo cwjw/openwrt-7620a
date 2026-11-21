@@ -1,45 +1,79 @@
 #!/bin/sh
 #
-# 【仪表版】只往 /tmp（tmpfs/内存）写，绝不碰 flash。
-#   - 旧版每秒写 /root/diag 再 sync，等于每秒一次 jffs2 擦写，本身就是一个
-#     与原厂差异极大的变量（原厂从不这么干），本版彻底去掉。
-#   - 每 5 秒采样 SoC 定时器/复位寄存器，写到 /tmp/regs.txt。
-#     复位后 /tmp 清空，所以必须在 150~174 秒那个 SSH 窗口里 cat /tmp/regs.txt。
+# 【取证版 v2】
+# 目标：硬复位之后仍然留下证据。
+#   - 每秒采样 SoC 定时器/复位寄存器到 /tmp/regs.txt（内存，便宜，不碰 flash）
+#   - 到 uptime >= 150 秒时，把最近 12 帧 + 当前寄存器一次性写到 flash
+#     （/root/death.txt），只写一次，不做任何循环擦写 —— 不是原厂没有的行为
+#   - 每次开机先把上次留下的 death.txt 轮转成 death.prev.txt，避免被本次覆盖
 #
-# 判读方法：
-#   t1l（TMR1LOAD，0x10000120）如果在死前一路递减  → SoC 里真有倒计时器在跑
-#   t1l 恒定不动                                     → 复位来自定时器以外
-#   t1c 的 bit7=1 表示 TMR1 已使能；bit0-1=3 表示处于 WDT 模式
-#   rst（RSTSTAT，0x10000038）bit1=WDT_RST_CAUSE，跨复位保留
+# 用法：刷入后等它自己复位一次 → 再次启动的 20 秒窗口内执行
+#          cat /root/death.prev.txt
+#       即可看到复位前最后一帧，以及复位前 60 秒的寄存器变化趋势。
+#
+# 判读：
+#   t1l（TMR1LOAD，0x10000120）在死前一路递减 → SoC 里真有倒计时器在跑
+#   t1l 恒定不动                              → 复位源不在 TMR1
+#   t1c bit7=1 表示 TMR1 已使能；bit0-1=3 表示处于 WDT 模式
+#   rst（RSTSTAT，0x10000038）bit1 疑似 WDT_RST_CAUSE，跨复位保留
+#
 
 D=/tmp
+FD=/root/death.txt
+FP=/root/death.prev.txt
+MARK=/root/.death_dumped
+
 REG_RST=0x10000038
 REG_TSTAT=0x10000100
 REG_T0L=0x10000110
 REG_T0C=0x10000118
 REG_T1L=0x10000120
 REG_T1C=0x10000128
+REG_T1MAX=0x10000130
 
 if command -v devmem >/dev/null 2>&1; then DV=yes; else DV=NO; fi
 reg() { devmem "$1" 32 2>/dev/null; }
 
+# 上一次死亡留下的帧轮转，别被本轮覆盖
+[ -f "$FD" ] && mv "$FD" "$FP" 2>/dev/null
+rm -f "$MARK" 2>/dev/null
+
 {
-	echo "=== boot $(date 2>/dev/null) up=$(cut -d' ' -f1 /proc/uptime)"
-	echo "--- devmem=$DV"
-	echo "--- RSTSTAT=$(reg $REG_RST) TMRSTAT=$(reg $REG_TSTAT)"
-	echo "--- TMR0LOAD=$(reg $REG_T0L) TMR0CTL=$(reg $REG_T0C)"
-	echo "--- TMR1LOAD=$(reg $REG_T1L) TMR1CTL=$(reg $REG_T1C)"
-	dmesg 2>/dev/null | grep -iE "Linux version|Memory:|rt2880_wdt|watchdog|Reset" | head -10
+	 echo "=== boot $(date 2>/dev/null) up=$(cut -d' ' -f1 /proc/uptime)"
+	 echo "--- devmem=$DV"
+	 echo "--- RSTSTAT=$(reg $REG_RST) TMRSTAT=$(reg $REG_TSTAT)"
+	 echo "--- TMR0LOAD=$(reg $REG_T0L) TMR0CTL=$(reg $REG_T0C)"
+	 echo "--- TMR1LOAD=$(reg $REG_T1L) TMR1CTL=$(reg $REG_T1C) TMR1MAX=$(reg $REG_T1MAX)"
+	 dmesg 2>/dev/null | grep -iE "Linux version|Memory:|rt2880|watchdog|Reset|clk_" | head -12
 } > $D/boot.txt 2>&1
+
+dump1() {
+	{
+		 echo "##### DEATH FRAME  up=$(cut -d' ' -f1 /proc/uptime) load=$(cat /proc/loadavg)"
+		 echo "##### RSTSTAT=$(reg $REG_RST) TMRSTAT=$(reg $REG_TSTAT)"
+		 echo "##### TMR0LOAD=$(reg $REG_T0L) TMR0CTL=$(reg $REG_T0C)"
+		 echo "##### TMR1LOAD=$(reg $REG_T1L) TMR1CTL=$(reg $REG_T1C) TMR1MAX=$(reg $REG_T1MAX)"
+		 echo "----- last 12 samples -----"
+		tail -n 12 $D/regs.txt 2>/dev/null
+		 echo "----- dmesg tail -----"
+		dmesg 2>/dev/null | tail -n 20
+	} > $FD 2>&1
+	sync
+}
 
 (
 	n=0
 	while :; do
 		U=$(cut -d' ' -f1 /proc/uptime)
-		echo "up=$U load=$(cut -d' ' -f1-3 /proc/loadavg) rst=$(reg $REG_RST) tstat=$(reg $REG_TSTAT) t0l=$(reg $REG_T0L) t0c=$(reg $REG_T0C) t1l=$(reg $REG_T1L) t1c=$(reg $REG_T1C)" >> $D/regs.txt
+		echo "up=$U load=$(cut -d' ' -f1-3 /proc/loadavg) rst=$(reg $REG_RST) tstat=$(reg $REG_TSTAT) t0l=$(reg $REG_T0L) t0c=$(reg $REG_T0C) t1l=$(reg $REG_T1L) t1c=$(reg $REG_T1C) t1max=$(reg $REG_T1MAX)" >> $D/regs.txt
+		# 到 150 秒落一帧到 flash，只落一次
+		if [ "$U" -ge 150 ] && [ ! -f "$MARK" ]; then
+			dump1
+			: > "$MARK"
+		fi
 		n=$((n + 1))
-		# 前 200 秒每 5 秒一次，之后每 30 秒一次，防止无限增长
-		if [ $n -lt 40 ]; then sleep 5; else sleep 30; fi
+		# 前 200 秒每 2 秒一次（提高倒计时斜率分辨率），之后每 30 秒
+		if [ $n -lt 100 ]; then sleep 2; else sleep 30; fi
 	done
 ) >/dev/null 2>&1 &
 
