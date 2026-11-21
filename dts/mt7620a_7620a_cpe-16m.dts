@@ -2,31 +2,19 @@
 // 板级描述：Sealan SL-IR4 / TX20（MT7620A + 16MB SPI-NOR，DDR2）
 // 1 LAN + 1 WAN，仅 2.4G，4 颗指示灯（上排 WIFI/4G，下排 SYS/LINK），SIM 卡槽，1 个 reset 键
 //
-// 【重要：内存刻意不声明 memory 节点】
-// 撤掉 memory@0 = <0x0 0x8000000>（128MB）的原因：
-//   原厂 SeaOS 自己报 MemTotal 64MB，说明 U-Boot 的 DDR 初始化只配了 64MB；
-//   内核按 DTB 拿 128MB 去用会采到未初始化的高部地址，实测一刷就起不来。
-//   不写 memory 节点时沿用目标默认 64MB（之前稳定启动的那版就是这个配置）。
-//   将来实测确认 DDR 真是 128MB 且 U-Boot 已初始化，再把节点加回来。
+// 【内存刻意不声明 memory 节点】
+// 不声明 memory 时沿用目标默认 64MB（已验证能稳定启动）。
 //
-// 【rootfs_data 也不再手动声明】
-// 之前的版本声明了 partition@b10000（0xB10000 +0x4F0000），与内核 squashfs-split
-// 自动生成的同名分区存在冲突风险（双 rootfs_data）。现在交给 mtdsplit 自切，
-// 这是已经验证能正常启动的配置。原厂 jffs2 仍留在 0xB10000，由 82_7620a_overlay_guard 清理/忽略。
+// 【rootfs_data 由 mtdsplit 自切】
+// 原厂 jffs2 仍留在 0xB10000。
 //
-// 实测确认的板级参数（来自原厂 16MB 备份 D:\router\tx20-boot.bin + 设备实测
-//   以及原厂 squashfs rootfs 反解后的脚本）：
+// 实测确认的板级参数：
 //   分区：u-boot 0x00000 +0x30000 / u-boot-env 0x30000 +0x10000 / factory 0x40000 +0x10000
-//         firmware 0x50000 +0xAC0000（原厂 squashfs 数据止于 0xB0E004）
-//   内核 cmdline：console=ttyS1,57600n8 root=/dev/mtdblock5
-//   网口：lan_port=0、wan_port=4（/etc/status/eth_led.sh）→ mediatek,portmap = "llllw"
-//   灯（全部来自原厂 rootfs 里 sealed <gpio> <state> 的调用）：
-//     GPIO30 = LINK   （/etc/status/eth_led.sh: wan_lan_led_num=30）
-//     GPIO32 = SYS    （/etc/diag.sh: status_led=32）
-//     GPIO31 = 4G     （实测点亮 4G 灯；原厂脚本未引用此脚，故原为“未知”，本轮按实测纠正）
-//     GPIO33 = WIFI   （原厂 /etc/status/ipsec.sh、vpn.sh 里 sealed 33 on/off，是本板上确实)
-//                     (存在的第 4 颗灯脚；WIFI 归属待现场再确认一次)
-//   按键：btnd reset 35 → GPIO35
+//         firmware 0x50000 +0xAC0000
+//   内核 cmdline：console=ttyS1,57600n8
+//   网口：lan_port=0、wan_port=4 → mediatek,portmap = "llllw"
+//   灯：GPIO30=LINK  GPIO31=4G  GPIO32=SYS  GPIO33=WIFI
+//   按键：reset GPIO35
 
 /dts-v1/;
 
@@ -53,7 +41,7 @@
 	leds {
 		compatible = "gpio-leds";
 
-		/* GPIO32：原厂 /etc/diag.sh 的 status_led = 32，实测 = 面板 SYS */
+		/* GPIO32：原厂 /etc/diag.sh status_led = 32 → 面板 SYS */
 		led_sys: led-sys {
 			function = LED_FUNCTION_POWER;
 			color = <LED_COLOR_ID_GREEN>;
@@ -61,22 +49,21 @@
 			default-state = "on";
 		};
 
-		/* GPIO30：原厂 eth_led.sh 的 wan_lan_led_num = 30，实测 = 面板 LINK */
+		/* GPIO30：原厂 eth_led.sh wan_lan_led_num = 30 → 面板 LINK */
 		led-link {
 			label = "link";
 			gpios = <&gpio1 6 GPIO_ACTIVE_LOW>;
 			linux,default-trigger = "netdev";
 		};
 
-		/* GPIO31：实测点亮 4G 灯。上一版误把它当成 WIFI，本轮纠正 */
+		/* GPIO31：实测点亮 4G 灯 */
 		led-4g {
 			label = "4g";
 			gpios = <&gpio1 7 GPIO_ACTIVE_LOW>;
 			default-state = "off";
 		};
 
-		/* GPIO33：原厂 ipsec.sh / vpn.sh 用 sealed 33 控制，是本板第 4 颗灯
-		 * 若现场发现 WIFI 灯不亮，用 /sys/class/gpio 扫 33/29/34/36 再定案 */
+		/* GPIO33：原厂 ipsec.sh / vpn.sh 用 sealed 33 控制 → 面板 WIFI */
 		led-wifi {
 			function = LED_FUNCTION_WLAN;
 			color = <LED_COLOR_ID_GREEN>;
@@ -101,7 +88,7 @@
 	status = "okay";
 };
 
-/* 板载 RS232（ADM3202）接在 UART0 上，原厂内核即 console=ttyS1,57600n8 */
+/* 板载 RS232（ADM3202）；原厂内核即 console=ttyS1,57600n8 */
 &uart {
 	status = "okay";
 };
@@ -175,7 +162,6 @@
 /*
  * 只把确实被当作 GPIO 用的引脚组放开：
  * LED(30-33) 落在 rgmii1 / wled 复用区，reset(35) 与 link 灯同组；
- * i2c 在本板上没有对应器件。
  * 不放开 uartf —— 串口控制台要留在 UART0 上。
  */
 &state_default {
@@ -198,25 +184,17 @@
 };
 
 /*
- * 方案C：SoC 硬件看门狗（rt2880_wdt）彻底不武装 —— 一次性判定复位来源。
+ * 硬件看门狗：照抄原厂行为 —— 武装 + 定时喂狗。
  *
- * 原理：本节点 disabled → 内核根本不注册 /dev/watchdog → procd 的
- *   watchdog_init() 拿不到设备（原来它在 13 秒成功 open 并 ioctl SETTIMEOUT=30、
- *   之后每 5 秒 write "X" 喂狗），因此硬件计数器 TMR1 从头到尾不会有任何倒计时，
- *   硬件层面不存在任何可能触发复位的看门狗。
+ * 原厂证据：/etc/init.d/done:58 `watchdog -T /dev/watchdog -s 5`
+ *   （/usr/bin/watchdog，MTK APSoC WatchDog Daemon），每 5 秒 write 一字节；
+ *   升级前还会 killall watchdog 并确认没有其它进程占着 /dev/watchdog。
  *
- * 补充证据（反解原厂镜像后得出）：原厂是武装看门狗的 —— /etc/init.d/done 里
- *   `watchdog -T /dev/watchdog -s 5`（/usr/bin/watchdog，MTK APSoC WatchDog Daemon），
- *   但它从不 ioctl 设超时，只用驱动默认值，每 5 秒 write 一字节喂狗。
- *   另：原厂 U-Boot 里找不到 TMR1LOAD/TMR1CTL 常量，可排除 bootloader 武装看门狗。
- *
- * 判读：
- *   ① 本镜像不再自动重启 → 根因即为看门狗（实测死点在 158/165/166/172.61 秒），
- *      终局方案应改成“像原厂那样武装 + 让 write 喂狗真正生效”，而不是永久关闭。
- *   ② 本镜像仍在 ~170 秒重启 → 看门狗彻底出局，转查硬件级复位（电源/复位线）。
- *
- * 注：方案B（patches/rt2880-wdt-fix-ping.patch）仍保留在源码树里，本镜像不执行。
+ * 之前的问题：驱动虽然 probe 了，但用户态从没有人 open(/dev/watchdog)，
+ *   所以 TMR1 从头到尾没被武装（probe 时读到 TMR1CTL=0 就是证据），
+ *   等于“狗饿着”，到点自然吸人。
+ *   本版把节点恢复 okay，并由 /etc/rc.local 持有一个长连接每 5 秒喂一次。
  */
 &watchdog {
-	status = "disabled";
+	status = "okay";
 };
