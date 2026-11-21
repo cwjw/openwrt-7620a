@@ -2,26 +2,40 @@
 # 编译前第二步：把仓库里的 files/ overlay 注入源码，做最终配置收尾
 # 注意：本步骤在 make defconfig 之后运行，**不要在这里改 .config**——
 # 否则构建途中会触发一次交互式 kconfig 重整，CI 里无 stdin 就会卡到 job 超时
-# （Plan E 就是这样卡满 6 小时被 cancel 的）。需要改 kconfig 请放 diy-part1 或种子配置。
+# （Plan E 就是这样卡满 6 小时被 cancel 的）。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT/openwrt"
 
-echo "==> 校验内核仪表真的进了 .config"
-# 实测教训：CONFIG_DEVMEM 只写在 target/linux/ramips/mt7620/config-6.6 时并没生效，
-# 固件里 devmem 命令存在、/dev/mem 却不存在。这里在 defconfig 之后硬校验，
-# 不满足就直接停，不浪费 40 分钟编译出一个“白刷”的固件。
+echo "==> 校验内核仪表配在“内核配置文件”里（不是 openwrt/.config）"
+# 实测教训（2026-11-21）：CONFIG_DEVMEM 写进 openwrt/.config 被 make defconfig 丢掉了，
+# 因为它是内核符号、不属于 OpenWrt 的 Kconfig 空间。内核符号只能落在
+# target/linux/{generic,ramips,ramips/mt7620}/config-6.6 这类文件里，
+# 而且必须确认里面没有残留 "# CONFIG_DEVMEM is not set" 这种否定行（后出现的行会赢）。
+KCFG_LIST="target/linux/generic/config-6.6 target/linux/ramips/config-6.6 target/linux/ramips/mt7620/config-6.6"
 for opt in CONFIG_DEVMEM CONFIG_PSTORE CONFIG_PSTORE_RAM CONFIG_PSTORE_CONSOLE; do
-	if ! grep -qx "${opt}=y" .config; then
-		echo "::error::${opt} 未在 .config 生效（内核仪表不可用，继续编译=白刷）"
-		grep -nE "${opt}" .config || true
+	if ! grep -h -qx "${opt}=y" $KCFG_LIST; then
+		echo "::error::${opt} 没有写进任何内核配置文件，devmem/pstore 会不可用"
 		exit 1
 	fi
-	grep -qx "${opt}=y" .config || exit 1
+	if grep -h -qx "# ${opt} is not set" $KCFG_LIST; then
+		# 同一文件内后行覆盖前行：确认肯定行在否定行之后
+		if [ "$(grep -hn "${opt}" $KCFG_LIST | tail -1 | grep -c '=y')" != "1" ]; then
+			echo "::error::${opt} 被另一处否定行覆盖"
+			grep -n "${opt}" $KCFG_LIST || true
+			exit 1
+		fi
+	fi
 done
-grep -q 'CONFIG_IO_STRICT_DEVMEM=y' .config && { echo "::error::IO_STRICT_DEVMEM 仍开着，devmem 会被拦"; exit 1; }
-echo "==> DEVMEM / PSTORE 校验通过"
+for bad in CONFIG_STRICT_DEVMEM CONFIG_IO_STRICT_DEVMEM; do
+	if grep -h -qx "${bad}=y" $KCFG_LIST; then
+		echo "::error::${bad} 仍为 y，会拦住 devmem 访问 MMIO"
+		grep -n "${bad}" $KCFG_LIST || true
+		exit 1
+	fi
+done
+echo "==> 内核仪表配置校验通过"
 
 echo "==> 注入 files/ 默认配置"
 rm -rf files
