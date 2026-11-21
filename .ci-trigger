@@ -1,5 +1,5 @@
 # 构建开关：本文件被修改并 push 到 main，auto.yml 就会自动复调用 build.yml 开始云编译。
 # 以后要重新构建（比如改了 DTS/patch/files/scripts），只需把最后一行改成新的时间戳，不用去 Actions 页面点按钮。
 
-plan: H-forensics2  (内核 CONFIG_DEVMEM=y + 关 STRICT_DEVMEM（devmem 才真的有 /dev/mem）；rc.local 死前一次性落 flash 取证帧；开机轮转 death.prev.txt)
-build: 2026-11-21T07:09Z  # <- 改这行即触发
+plan: I-heal  (内核 DEVMEM=y + t=150s 落证据到 flash 后立即清零 TMR1；若能活过 174.5s 则问题当场解除，且从此有无限长 SSH 窗口)
+build: 2026-11-21T07:40Z  # <- 改这行即触发
