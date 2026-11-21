@@ -1,5 +1,5 @@
 # 构建开关：本文件被修改并 push 到 main，auto.yml 就会自动复调用 build.yml 开始云编译。
 # 以后要重新构建（比如改了 DTS/patch/files/scripts），只需把最后一行改成新的时间戳，不用去 Actions 页面点按钮。
 
-plan: J-stock-behavior  (完全照拄原厂：&watchdog=okay 武装 + rc.local 长持有 fd 每5秒喂狗；devmem/GPIO_SYSFS 保留作备用手段)
-build: 2026-11-21T07:47Z  # <- 改这行即触发
+plan: K-final  (一次性做全照拄原厂：&watchdog=okay 武装 + rc.local 长持 fd 每5秒喂狗 + 四颗灯按原厂脚本驱动（SYS慢闪/LINK跟网口/WIFI兼VPN/4G跟EC20）+ 固件自带验收写 flash（t165 检查点、t200 alive@200）)
+build: 2026-11-21T07:54Z  # <- 改这行即触发
