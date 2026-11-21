@@ -38,6 +38,25 @@
 		bootargs = "console=ttyS1,57600n8";
 	};
 
+	/*
+	 * ramoops：死前日志寄存在 DDR 里，热复位不会丢。
+	 * 64MB DDR 的顶部 256KB（0x3F00000~0x3F3FFFF）预留给我自己用。
+	 * 复位后把 /sys/fs/pstore/ 挂起来读，就能看到崩溃/看门狗触发前的内核输出。
+	 */
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		ramoops@3f00000 {
+			compatible = "ramoops";
+			reg = <0x3f00000 0x40000>;
+			record-size = <0x10000>;
+			console-size = <0x20000>;
+			pmsg-size = <0x10000>;
+		};
+	};
+
 	leds {
 		compatible = "gpio-leds";
 
@@ -184,16 +203,17 @@
 };
 
 /*
- * 硬件看门狗：照抄原厂行为 —— 武装 + 定时喂狗。
+ * 硬件看门狗：保持 okay，由 procd 句柄持有。
  *
- * 原厂证据：/etc/init.d/done:58 `watchdog -T /dev/watchdog -s 5`
- *   （/usr/bin/watchdog，MTK APSoC WatchDog Daemon），每 5 秒 write 一字节；
- *   升级前还会 killall watchdog 并确认没有其它进程占着 /dev/watchdog。
+ * 实测结论（2026-11-21）：
+ *   /dev/watchdog 被 procd(pid 1) 持有，用户态再 open 返回 EBUSY；
+ *   /sys/class/watchdog/watchdog0 = timeout 30 / max 107 / state active；
+ *   若“喂狗无效”则应在 77 秒复位，但实测死点仍是 ~174.5 秒，
+ *   且 SYSC_RSTSTAT=c0030000 的 WDT_RST_CAUSE(bit1) 未置位。
+ *   → 复位不来自 TMR1 看门狗。
  *
- * 之前的问题：驱动虽然 probe 了，但用户态从没有人 open(/dev/watchdog)，
- *   所以 TMR1 从头到尾没被武装（probe 时读到 TMR1CTL=0 就是证据），
- *   等于“狗饿着”，到点自然吸人。
- *   本版把节点恢复 okay，并由 /etc/rc.local 持有一个长连接每 5 秒喂一次。
+ * 174.4 秒 ≈ 0x1A000 × 65536 / 40MHz，像一个独立计数器数到封顶。
+ * 本版保留 okay，并把 TMR 块寄存器序列每 5 秒写进 flash，用来抓那个计数器。
  */
 &watchdog {
 	status = "okay";
