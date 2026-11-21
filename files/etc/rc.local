@@ -1,71 +1,45 @@
 #!/bin/sh
 #
-# 【排障期专用】开机取证 + SoC 寄存器直读（定案后整份删除即可）
-# 1) 每次开机把 uptime、复位原由寄存器、看门狗相关日志追加到 /root/diag/boot.log
-# 2) 后台每秒：uptime + loadavg + SoC 定时器/复位寄存器 + dmesg 尾部，
-#    先写 tmp.log 再 mv 成 last.log（重启后永远是完整的“临终遗言”）
-# 3) 每 5 秒往 /root/diag/up.log 记一行时间序列，自限长 200 行
-# 4) 生成 /root/diag/regs.sh，随时手动读一次寄存器
+# 【仪表版】只往 /tmp（tmpfs/内存）写，绝不碰 flash。
+#   - 旧版每秒写 /root/diag 再 sync，等于每秒一次 jffs2 擦写，本身就是一个
+#     与原厂差异极大的变量（原厂从不这么干），本版彻底去掉。
+#   - 每 5 秒采样 SoC 定时器/复位寄存器，写到 /tmp/regs.txt。
+#     复位后 /tmp 清空，所以必须在 150~174 秒那个 SSH 窗口里 cat /tmp/regs.txt。
 #
-# 判读（重启后）：
-#   last.log 首行 up 值：卡在 160~175 → 时间型硬复位
-#   首行里的 t1l 若在死前一路递减 → SoC 里有个隐藏计数器在倒数（有源头可查）
-#   t1l 恒定不动 → 定时器组与此无关，复位来自定时器以外的复位源
-#   rst 里 bit1(WDT_RST_CAUSE) 置位 → 上一次复位来自看门狗
+# 判读方法：
+#   t1l（TMR1LOAD，0x10000120）如果在死前一路递减  → SoC 里真有倒计时器在跑
+#   t1l 恒定不动                                     → 复位来自定时器以外
+#   t1c 的 bit7=1 表示 TMR1 已使能；bit0-1=3 表示处于 WDT 模式
+#   rst（RSTSTAT，0x10000038）bit1=WDT_RST_CAUSE，跨复位保留
 
-D=/root/diag
-mkdir -p $D
-W=/sys/class/watchdog/watchdog0
-
-# 物理地址（MT7620A，SYSC 基址 0x10000000）
-#  0x38 复位状态 RSTSTAT（跨复位保留，是“上一次谁按的复位”唯一证据）
-#  0x100 定时器状态 TMRSTAT   0x110/0x118 TMR0   0x120/0x128 TMR1
+D=/tmp
 REG_RST=0x10000038
 REG_TSTAT=0x10000100
 REG_T0L=0x10000110
+REG_T0C=0x10000118
 REG_T1L=0x10000120
 REG_T1C=0x10000128
 
+if command -v devmem >/dev/null 2>&1; then DV=yes; else DV=NO; fi
 reg() { devmem "$1" 32 2>/dev/null; }
-
-cat > $D/regs.sh <<'EORS'
-#!/bin/sh
-# 手动读一次 SoC 关键寄存器
-reg() { devmem "$1" 32 2>/dev/null || echo "no-devmem"; }
-echo "RSTSTAT  $(reg 0x10000038)"
-echo "TMRSTAT  $(reg 0x10000100)"
-echo "TMR0LOAD $(reg 0x10000110)"
-echo "TMR0CTL  $(reg 0x10000118)"
-echo "TMR1LOAD $(reg 0x10000120)"
-echo "TMR1CTL  $(reg 0x10000128)"
-EORS
-chmod +x $D/regs.sh 2>/dev/null
 
 {
 	echo "=== boot $(date 2>/dev/null) up=$(cut -d' ' -f1 /proc/uptime)"
-	echo "--- devmem: $(command -v devmem >/dev/null 2>&1 && echo yes || echo NO)"
+	echo "--- devmem=$DV"
 	echo "--- RSTSTAT=$(reg $REG_RST) TMRSTAT=$(reg $REG_TSTAT)"
-	echo "--- TMR0LOAD=$(reg $REG_T0L) TMR1LOAD=$(reg $REG_T1L) TMR1CTL=$(reg $REG_T1C)"
-	echo "--- wdt sysfs: $(ls $W 2>/dev/null | tr '\n' ' ')"
-	dmesg 2>/dev/null | grep -iE "rt2880_wdt|watchdog|Reboot|reset|Linux version|Memory:" | head -12
-} >> $D/boot.log
+	echo "--- TMR0LOAD=$(reg $REG_T0L) TMR0CTL=$(reg $REG_T0C)"
+	echo "--- TMR1LOAD=$(reg $REG_T1L) TMR1CTL=$(reg $REG_T1C)"
+	dmesg 2>/dev/null | grep -iE "Linux version|Memory:|rt2880_wdt|watchdog|Reset" | head -10
+} > $D/boot.txt 2>&1
 
 (
 	n=0
 	while :; do
 		U=$(cut -d' ' -f1 /proc/uptime)
-		{
-			echo "### up=$U load=$(cut -d' ' -f1-3 /proc/loadavg) wdt=$(cat $W/state 2>/dev/null || echo none) rst=$(reg $REG_RST) tstat=$(reg $REG_TSTAT) t0l=$(reg $REG_T0L) t1l=$(reg $REG_T1L) t1c=$(reg $REG_T1C)"
-			dmesg 2>/dev/null | tail -n 60
-		} > $D/tmp.log 2>/dev/null
-		mv $D/tmp.log $D/last.log 2>/dev/null
+		echo "up=$U load=$(cut -d' ' -f1-3 /proc/loadavg) rst=$(reg $REG_RST) tstat=$(reg $REG_TSTAT) t0l=$(reg $REG_T0L) t0c=$(reg $REG_T0C) t1l=$(reg $REG_T1L) t1c=$(reg $REG_T1C)" >> $D/regs.txt
 		n=$((n + 1))
-		if [ $((n % 5)) -eq 0 ]; then
-			echo "up=$U rst=$(reg $REG_RST) t1l=$(reg $REG_T1L) t1c=$(reg $REG_T1C)" >> $D/up.log
-			tail -n 200 $D/up.log > $D/up.tmp 2>/dev/null && mv $D/up.tmp $D/up.log
-		fi
-		sync 2>/dev/null
-		sleep 1
+		# 前 200 秒每 5 秒一次，之后每 30 秒一次，防止无限增长
+		if [ $n -lt 40 ]; then sleep 5; else sleep 30; fi
 	done
 ) >/dev/null 2>&1 &
 
