@@ -1,87 +1,34 @@
 #!/bin/sh
 #
-# 【取证 + 自救 版 v3】
-# 设计目标：把“只能看 20 秒”这个问题彻底绕开。
+# 照抄原厂行为：武装硬件看门狗，并每 5 秒喂一次。
+#   原厂 /etc/init.d/done:58 → `watchdog -T /dev/watchdog -s 5`
+#   我们之前把驱动禁掉、也没人 open /dev/watchdog，等于“狗饿着”，到点就吸人。
 #
-# 思路：
-#   原厂 /etc/init.d/done:58 有 `watchdog -T /dev/watchdog -s 5`，每 5 秒碰一次
-#   硬件计数器；我们把 watchdog 驱动禁了以后没人碰它，它就自己数到 0 复位。
-#   实测死点固定 174.5s（不随负载）——典型倒计时。
-#   所以本版在 t>=150s 时：先落证据到 flash，然后立刻把 TMR1 清零。
+# 关键：必须长期持有 /dev/watchdog 的 fd。
+#   如果每次 `echo X > /dev/watchdog` 后就关闭，驱动会在 close 时 disarm，
+#   变成“开了又关”，跟没开一样。所以用 exec 3> 把 fd 一直拿着。
 #
-# 结果二选一，都是有用信息：
-#   A. 设备活过 174.5s 并继续运行  → TMR1 就是复位源，问题当场解决，而且从此
-#      有无限长的 SSH 窗口（不再需要在 20 秒里抢数据）
-#   B. 设备仍在 ~174.5s 静默复位  → 倒计时不在 TMR1；下一轮开机读
-#      /root/death.prev.txt 即可看到 t=150s 时的真实寄存器值
+# 验证：
+#   cat /tmp/wdog.log     能看到每秒 5 秒一条 feed 记录
+#   ls -l /dev/watchdog    应存在
+#   uptime 能跑过 200 秒    就说明不会再自动重启
 #
-# 判读：
-#   t1l（TMR1LOAD，0x10000120）在死前递减 → 确实是 TMR1
-#   t1c bit7=1 表示已使能，bit0-1=3 表示 WDT 模式
-#   rst（RSTSTAT，0x10000038）bit1 疑似 WDT_RST_CAUSE
-#
-
-D=/tmp
-FD=/root/death.txt
-FP=/root/death.prev.txt
-MARK=/root/.death_dumped
-
-REG_RST=0x10000038
-REG_TSTAT=0x10000100
-REG_T0L=0x10000110
-REG_T0C=0x10000118
-REG_T1L=0x10000120
-REG_T1C=0x10000128
-REG_T1MAX=0x10000130
-
-if command -v devmem >/dev/null 2>&1 && [ -c /dev/mem ]; then DV=yes; else DV=NO; fi
-reg() { devmem "$1" 32 2>/dev/null; }
-
-[ -f "$FD" ] && mv "$FD" "$FP" 2>/dev/null
-rm -f "$MARK" 2>/dev/null
-
-{
-	 echo "=== boot $(date 2>/dev/null) up=$(cut -d' ' -f1 /proc/uptime) devmem=$DV"
-	 echo "--- RSTSTAT=$(reg $REG_RST) TMRSTAT=$(reg $REG_TSTAT)"
-	 echo "--- TMR0LOAD=$(reg $REG_T0L) TMR0CTL=$(reg $REG_T0C)"
-	 echo "--- TMR1LOAD=$(reg $REG_T1L) TMR1CTL=$(reg $REG_T1C) TMR1MAX=$(reg $REG_T1MAX)"
-	 dmesg 2>/dev/null | grep -iE "Linux version|Memory:|rt2880|rt-timer|watchdog|Reset" | head -12
-} > $D/boot.txt 2>&1
-
-relief() {
-	{
-		 echo "##### FRAME @t150  up=$(cut -d' ' -f1 /proc/uptime) load=$(cat /proc/loadavg)"
-		 echo "##### RSTSTAT=$(reg $REG_RST) TMRSTAT=$(reg $REG_TSTAT)"
-		 echo "##### TMR0LOAD=$(reg $REG_T0L) TMR0CTL=$(reg $REG_T0C)"
-		 echo "##### TMR1LOAD=$(reg $REG_T1L) TMR1CTL=$(reg $REG_T1C) TMR1MAX=$(reg $REG_T1MAX)"
-		 echo "----- last 12 samples -----"
-		tail -n 12 $D/regs.txt 2>/dev/null
-		 echo "----- dmesg tail -----"
-		dmesg 2>/dev/null | tail -n 15
-	} > $FD 2>&1
-	sync
-
-	# 关键动作：把 TMR1 停掉（clear load + clear ctl），让倒计时作废
-	if [ "$DV" = yes ]; then
-		devmem $REG_T1L 32 0 2>/dev/null
-		devmem $REG_T1C 32 0 2>/dev/null
-		devmem $REG_TSTAT 32 0 2>/dev/null
-		echo "##### RELIEF applied t1l=$(reg $REG_T1L) t1c=$(reg $REG_T1C) rst=$(reg $REG_RST)" >> $FD
-	sync
-	fi
-}
 
 (
-	n=0
+	exec 3>/dev/watchdog 2>/dev/null
+	if [ $? -ne 0 ]; then
+		echo "FAIL: 无法打开 /dev/watchdog（驱动未加载或节点不存在）" > /tmp/wdog.log
+		exit 0
+	fi
+	echo "open /dev/watchdog OK at up=$(cut -d' ' -f1 /proc/uptime)" > /tmp/wdog.log
 	while :; do
-		U=$(cut -d' ' -f1 /proc/uptime)
-		echo "up=$U load=$(cut -d' ' -f1-3 /proc/loadavg) rst=$(reg $REG_RST) tstat=$(reg $REG_TSTAT) t0l=$(reg $REG_T0L) t0c=$(reg $REG_T0C) t1l=$(reg $REG_T1L) t1c=$(reg $REG_T1C) t1max=$(reg $REG_T1MAX)" >> $D/regs.txt
-		if [ "$U" -ge 150 ] && [ ! -f "$MARK" ]; then
-			relief
-			: > "$MARK"
+		up=$(cut -d' ' -f1 /proc/uptime)
+		if printf 'X' >&3 2>/dev/null; then
+			echo "up=$up feed OK" >> /tmp/wdog.log
+		else
+			echo "up=$up feed FAIL" >> /tmp/wdog.log
 		fi
-		n=$((n + 1))
-		if [ $n -lt 100 ]; then sleep 2; else sleep 30; fi
+		sleep 5
 	done
 ) >/dev/null 2>&1 &
 
