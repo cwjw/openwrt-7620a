@@ -27,7 +27,7 @@ on:
     tags:
       - 'v*'
 
-# 同一分义只保留最新一次构建：重复触发会直接干掉旧的，不浪费排队时间。
+# 同一分支只保留最新一次构建：重复触发会直接干掉旧的，不浪费排队时间。
 concurrency:
   group: build-mt7620a-${{ github.ref }}
   cancel-in-progress: true
@@ -92,15 +92,14 @@ jobs:
           cd openwrt && git log -1 --pretty=format:'源码版本: %h %s%n'
 
       # ------------------------------------------------------------------
-      # 三级缓存。云编译的耗时大头依次是：
-      #   ① 下载依赖包（约 10~15 分钟）
-      #   ② 编工具链 + host 工具（约 15~25 分钟）
-      #   ③ 编软件包（约 20~30 分钟，ccache 能把这块砍一半以上）
-      # 前两项用 actions/cache 整块搬运，第三项靠 ccache。
-      # 注意：必须在 clone 之后恢复，否则路径不存在。
+      # 三级缓存（三个独立 cache 条目，各自自动回存，不会合成一个巨型包）：
+      #   ① dl/     依赖包 tar   —— 约 2GB，省 10~15 分钟下载
+      #   ② 工具链 + host 工具 —— 约 2GB，省 15~25 分钟（最大一块）
+      #   ③ .ccache 编译产物    —— 上限 1GB，把软件包重编砍掉一多半
+      # 必须在 clone 之后恢复，否则路径不存在。
       # ------------------------------------------------------------------
-      - name: 恢复下载缓存 dl/（关键 key 随配置变化，带前缀回退）
-        uses: actions/cache/restore@v4
+      - name: 缓存下载目录 dl/
+        uses: actions/cache@v4
         with:
           path: openwrt/dl
           key: dl-${{ env.CACHE_VER }}-${{ env.REPO_BRANCH }}-${{ hashFiles('configs/*.config') }}
@@ -108,21 +107,21 @@ jobs:
             dl-${{ env.CACHE_VER }}-${{ env.REPO_BRANCH }}-
             dl-
 
-      - name: 恢复工具链 / host 工具缓存（精确 key，配置一改就重建）
+      - name: 缓存工具链 / host 工具（精确 key，不带回退）
         id: tc-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache@v4
         with:
           path: |
             openwrt/staging_dir/host
             openwrt/staging_dir/toolchain-*
             openwrt/build_dir/host
             openwrt/build_dir/toolchain-*
-          # 故意不加 restore-keys：工具链缓存不完整/过期会直接报神秘编译错误，
+          # 故意不加 restore-keys：工具链缓存过期/不完整会直接报神秘编译错误，
           # 宁可重建也不吃一份错位的 staging_dir。
           key: tc-${{ env.CACHE_VER }}-${{ runner.os }}-${{ hashFiles('configs/mt7620a-16m.config') }}
 
-      - name: 恢复 ccache 缓存
-        uses: actions/cache/restore@v4
+      - name: 缓存 ccache
+        uses: actions/cache@v4
         with:
           path: .ccache
           key: ccache-${{ env.CACHE_VER }}-${{ env.REPO_BRANCH }}-${{ hashFiles('configs/*.config') }}
@@ -163,7 +162,7 @@ jobs:
             exit 1
           fi
 
-          # 加速核心：没开 CCACHE 就相当于 cach 一点没命中，直接判失败。
+          # 加速核心：没开 CCACHE 就相当于 ccache 一点没命中，直接判失败。
           if ! grep -qx 'CONFIG_CCACHE=y' .config; then
             echo "::error::CONFIG_CCACHE 未生效，本次构建不会走 ccache"
             exit 1
@@ -234,15 +233,13 @@ jobs:
           else
             STATUS=1
           fi
-          # 无论成败都把 ccache 命中和编译耗时打出来
           echo "===== ccache 统计 ====="
           ccache -s || true
-          echo "===== 编译耗时 ====="
-          echo "共用时 $(( ($(date +%s) - BUILD_START) / 60 )) 分钟"
+          echo "===== 本次至此刻已耗时 $(( ($(date +%s) - BUILD_START) / 60 )) 分钟 ====="
           if [ $STATUS -eq 0 ]; then exit 0; fi
           echo "::warning::首次构建失败或被 timeout 终止，重跑详细日志定位真正的错误行"
           if [ "${{ steps.tc-cache.outputs.cache-hit }}" = "true" ]; then
-            echo "::warning::本次命中了工具链缓存，若报错诡异，请把 workflow 里 CACHE_VER 加 1 后重跑"
+            echo "::warning::本次命中了工具链缓存，如报错诡异，把 workflow 里 CACHE_VER 加 1 后重跑"
           fi
           timeout 40m make -j1 V=s < /dev/null 2>&1 | tee build-detail.log || true
           echo "===== 错误摘要（error / Error） ====="
@@ -290,19 +287,6 @@ jobs:
           path: output/*
           if-no-files-found: error
           retention-days: 30
-
-      - name: 回存工具链 / 下载 / ccache 缓存
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            openwrt/dl
-            openwrt/staging_dir/host
-            openwrt/staging_dir/toolchain-*
-            openwrt/build_dir/host
-            openwrt/build_dir/toolchain-*
-            .ccache
-          key: all-${{ env.CACHE_VER }}-${{ env.REPO_BRANCH }}-${{ github.run_id }}
 
       - name: 发布 Release
         if: success() && (github.event.inputs.tag != '' || inputs.tag != '' || startsWith(github.ref, 'refs/tags/'))
