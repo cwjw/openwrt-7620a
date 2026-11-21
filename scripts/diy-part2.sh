@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # 编译前第二步：把仓库里的 files/ overlay 注入源码，做最终配置收尾
+# 注意：本步骤在 make defconfig 之后运行，**不要在这里改 .config**——
+# 否则构建途中会触发一次交互式 kconfig 重整，CI 里无 stdin 就会卡到 job 超时
+# （Plan E 就是这样卡满 6 小时被 cancel 的）。需要改 kconfig 请放 diy-part1。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -21,7 +24,6 @@ echo "==> 校验首启 overlay 守护脚本已注入"
 ls -l files/lib/preinit/
 grep -q 'boot_hook_add preinit_main' files/lib/preinit/82_7620a_overlay_guard
 
-# 862：preinit 钩子按文件名排序，82 必须排在 80_mount_root 之后
 test "$(basename files/lib/preinit/82_7620a_overlay_guard)" \> "80_mount_root" || exit 1
 
 echo "==> 注册开机自启（7620a-wifi）"
@@ -39,26 +41,6 @@ exit 0
 EOFT
   chmod +x files/etc/uci-defaults/98-theme-argon
 fi
-
-# ---------------------------------------------------------------------------
-# busybox devmem：排障期用来从用户空间直读 SoC 寄存器（/dev/mem + mmap，零额外包）
-# 已在源码树核实两个 kconfig 事实：
-#   1. 符号名是 CONFIG_BUSYBOX_CONFIG_DEVMEM（不是 CONFIG_DEVMEM）；
-#   2. 它只在 CONFIG_BUSYBOX_CUSTOM=y 时可见（busybox Makefile 里
-#      BUSYBOX_SYM=$(if $(CONFIG_BUSYBOX_CUSTOM),CONFIG,DEFAULT)）。
-#   打开 CUSTOM 只会把其余 applet 拉回各自的 BUSYBOX_DEFAULT_* 默认值，
-#   与当前镜像行为一致，不会增减其他命令。
-# 注意：本脚本在 make defconfig 之后运行，所以这里的修改不会被 defconfig 冲掉。
-# ---------------------------------------------------------------------------
-echo "==> 打开 busybox devmem（读 SoC 寄存器用）"
-sed -i '/^# CONFIG_BUSYBOX_CONFIG_DEVMEM is not set/d;/^CONFIG_BUSYBOX_CONFIG_DEVMEM=/d' .config
-grep -q '^CONFIG_BUSYBOX_CUSTOM=y' .config || echo 'CONFIG_BUSYBOX_CUSTOM=y' >> .config
-echo 'CONFIG_BUSYBOX_CONFIG_DEVMEM=y' >> .config
-grep -q '^CONFIG_BUSYBOX_CUSTOM=y' .config || { echo '!! BUSYBOX_CUSTOM 未写入'; exit 1; }
-grep -q '^CONFIG_BUSYBOX_CONFIG_DEVMEM=y' .config || { echo '!! DEVMEM 未写入'; exit 1; }
-# 确认内核侧 /dev/mem 可用（MIPS 没有 STRICT_DEVMEM 这道锁）
-grep -q '^CONFIG_DEVMEM=y' target/linux/ramips/mt7620/config-6.6 2>/dev/null \
-  || echo 'CONFIG_DEVMEM=y' >> target/linux/ramips/mt7620/config-6.6
 
 echo "==> 写入固件标识"
 echo "MT7620A custom build / $(date '+%Y-%m-%d %H:%M') / branch $(git -C . rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)" \
