@@ -12,13 +12,11 @@ DTS=target/linux/ramips/dts/mt7620a_7620a_cpe-16m.dts
 
 # ---------------------------------------------------------------------------
 # 差异修正 1：时钟门控。
-# 原厂 3.10.14 SDK 内核里根本没有 common clock framework（对 vmlinux 字符串扫描
-# “clk_”“Disabling unused clocks”均为 0 命中），所有外设时钟开机后一直保持开启；
-# 而 mainline 6.6 在启动末尾会执行 clk_disable_unused()，把没人显式持有的时钟
-# 全部关掉（我们启动日志第 100 行就是 “clk: Disabling unused clocks”）。
-# 这是二者在硬件时钟域上的头号差异，先用 clk_ignore_unused 对齐成“一律不关时钟”。
+# 原厂 3.10.14 SDK 内核里根本没有 common clock framework，所有外设时钟开机后
+# 一直保持开启；而 mainline 6.6 启动末尾会 clk_disable_unused() 把没人持有的
+# 时钟全关掉。先用 clk_ignore_unused 把行为对齐成“一律不关时钟”。
 # ---------------------------------------------------------------------------
-echo "==> 对齐原厂：cmdline 加 clk_ignore_unused（禁止内核关闭未使用时钟）"
+echo "==> 对齐原厂：cmdline 加 clk_ignore_unused"
 if ! grep -q 'clk_ignore_unused' "$DTS"; then
 	sed -i 's|bootargs = "console=ttyS1,57600n8";|bootargs = "console=ttyS1,57600n8 clk_ignore_unused";|' "$DTS"
 fi
@@ -26,12 +24,12 @@ grep -q 'clk_ignore_unused' "$DTS" || { echo '!! bootargs 未加上 clk_ignore_u
 grep -q 'bootargs = "console=ttyS1,57600n8 clk_ignore_unused";' "$DTS" || { echo '!! bootargs 写法与预期不符'; exit 1; }
 
 # ---------------------------------------------------------------------------
-# 方案B（备选）：修正 rt2880_wdt 的喂狗逻辑
-# 放到 ramips 的 patches-6.6，编号 999 排在其他 ramips 补丁之后，避免上下文冲突。
-# 当前 DTS 已把 &watchdog 置为 disabled（方案C），驱动不会被 probe，本补丁只会被
-# 编译进内核但不会执行；保留它便于回头做“真喂狗”的永久修法。
+# 看门狗：照抄原厂“武装 + 每5秒喂狗”
+#   ＿主补丁修正 rt2880_wdt 的喂狗逻辑（否则 ping 可能不真的重装负载）
+#   ＿DTS 的 &watchdog 必须 okay，否则驱动不注册 /dev/watchdog
+#   ＿/etc/rc.local 必须持有一个长连接每 5 秒 write（否则 close 时会 disarm）
 # ---------------------------------------------------------------------------
-echo "==> 注入方案B 内核补丁（rt2880_wdt fix-ping，目前不生效，仅保留待用）"
+echo "==> 注入内核补丁：rt2880_wdt fix-ping"
 PATCH_SRC="$ROOT/patches/rt2880-wdt-fix-ping.patch"
 PATCH_DST="target/linux/ramips/patches-6.6/999-rt2880-wdt-fix-ping.patch"
 [ -f "$PATCH_SRC" ] || { echo "!! 找不到 $PATCH_SRC"; exit 1; }
@@ -40,22 +38,20 @@ for k in 'TIMER_TMRSTAT_GAP' 'rt_wdt_stat_w32(drvdata, TMRSTAT_TMR1RST)'; do
 	grep -qF "$k" "$PATCH_DST" || { echo "!! 补丁缺少关键行：$k"; exit 1; }
 done
 
-# ---------------------------------------------------------------------------
-# 方案C：看门狗彻底不武装（已实测：无 /dev/watchdog、dmesg 中 rt2880 0 命中）
-# ---------------------------------------------------------------------------
-echo "==> 校验方案C：&watchdog 必须为 disabled"
+echo "==> 校验：&watchdog 必须为 okay（武装看门狗）"
 grep -q '&watchdog {' "$DTS" || { echo '!! DTS 中没有 &watchdog 节点'; exit 1; }
-if ! grep -A3 '&watchdog {' "$DTS" | grep -q 'disabled'; then
-	echo '!! DTS 仍把 watchdog 置为开启，方案C 要求 disabled'; exit 1
+if ! grep -A3 '&watchdog {' "$DTS" | grep -q 'okay'; then
+	echo '!! DTS 里 &watchdog 不是 okay，驱动不会注册 /dev/watchdog'; exit 1
 fi
+
+echo "==> 校验：rc.local 必须含喂狗循环"
+grep -qF 'exec 3>/dev/watchdog' "$ROOT/files/etc/rc.local" || { echo '!! rc.local 缺少喂狗循环，狗会饿死'; exit 1; }
 
 # ---------------------------------------------------------------------------
 # 内核调车开关
-#   CONFIG_WATCHDOG_SYSFS / CONFIG_GPIO_SYSFS：排障预留、现场试灯
-#   CONFIG_DEVMEM：busybox devmem 打开的是 /dev/mem，这个设备节点由内核决定。
-#     实测 E 版（只有 busybox applet、没有内核开关）直报
-#     “ls: /dev/mem: No such file or directory” → devmem 完全不可用。
-#     所以必须在内核配置里显式打开，并关掉 STRICT_DEVMEM 限制。
+#   CONFIG_WATCHDOG_SYSFS / CONFIG_GPIO_SYSFS：排障、现场试灯
+#   CONFIG_DEVMEM：busybox devmem 打开的是 /dev/mem，由内核决定。
+#     实测只加 busybox applet 的版本直接报 “ls: /dev/mem: No such file”。
 # ---------------------------------------------------------------------------
 echo "==> 打开 CONFIG_WATCHDOG_SYSFS / CONFIG_GPIO_SYSFS / CONFIG_DEVMEM"
 KCFG=target/linux/ramips/mt7620/config-6.6
@@ -68,7 +64,6 @@ for opt in CONFIG_WATCHDOG_SYSFS CONFIG_GPIO_SYSFS; do
 	grep -qx "$opt=y" "$KCFG" || { echo "!! $opt 未写入"; exit 1; }
 done
 
-# CONFIG_DEVMEM=y（仅精确匹配本符号，不会误伤 CONFIG_STRICT_DEVMEM）
 if grep -qxE 'CONFIG_DEVMEM=.*|# CONFIG_DEVMEM is not set' "$KCFG"; then
 	sed -i -e 's/^# CONFIG_DEVMEM is not set$/CONFIG_DEVMEM=y/' -e 's/^CONFIG_DEVMEM=.*/CONFIG_DEVMEM=y/' "$KCFG"
 else
@@ -76,7 +71,6 @@ else
 fi
 grep -qx 'CONFIG_DEVMEM=y' "$KCFG" || { echo '!! CONFIG_DEVMEM 未写入'; exit 1; }
 
-# 关闭 STRICT_DEVMEM（否则 I/O 区以外的访问会被拦）
 if grep -qxE 'CONFIG_STRICT_DEVMEM=.*|# CONFIG_STRICT_DEVMEM is not set' "$KCFG"; then
 	sed -i -e 's/^CONFIG_STRICT_DEVMEM=.*/# CONFIG_STRICT_DEVMEM is not set/' "$KCFG"
 else
@@ -85,10 +79,7 @@ fi
 grep -qx '# CONFIG_STRICT_DEVMEM is not set' "$KCFG" || { echo '!! STRICT_DEVMEM 未关闭'; exit 1; }
 
 # ---------------------------------------------------------------------------
-# 差异修正 2：镜像尺寸精确等于原厂 firmware 分区。
-# 原厂镜像 11,272,192 B = 0xAC0000，与分区 firmware 0x50000+0xAC0000 完全相等。
-# 之前用 pad-to 11534336(0xB00000) 会让镜像尾部越过分区边界，写进原厂 jffs2
-# 起点 0xB10000——这是真实差异，本版收回到 0xAC0000。
+# 镜像尺寸精确等于原厂 firmware 分区 0xAC0000 = 11,272,192 B
 # ---------------------------------------------------------------------------
 echo "==> 追加镜像定义到 ramips/mt7620（尺寸对齐原厂 0xAC0000）"
 MK=target/linux/ramips/image/mt7620.mk
@@ -98,7 +89,6 @@ if ! grep -q 'Device/7620a_cpe-16m' "$MK"; then
 # ---------------------------------------------------------------------------
 # 自制板型：Sealan SL-IR4 / TX20
 # MT7620A + 16MB SPI-NOR(MX25L12835F) + 64MB 可用 DDR2 + 1WAN/1LAN + 仅 2.4G
-# 固件区与原厂完全一致：0x50000 起，长 0xAC0000，镜像也正好 0xAC0000
 # ---------------------------------------------------------------------------
 define Device/7620a_cpe-16m
 	SOC := mt7620a
@@ -109,7 +99,7 @@ define Device/7620a_cpe-16m
 	IMAGE_SIZE := 11008k
 	IMAGES += factory.bin
 	# 原厂镜像长度就是 11272192(0xAC0000)，与原厂分区等长；不要改大，
-	# 否则尾部会写穿到原厂 jffs2 起点 0xB10000（这是与原厂的真实差异）。
+	# 否则尾部会写穿到原厂 jffs2 起点 0xB10000。
 	IMAGE/factory.bin := append-kernel | append-rootfs | pad-rootfs | \
 		pad-to 11272192 | check-size
 	DEVICE_PACKAGES := kmod-rt2800-soc kmod-usb2 kmod-usb-ohci \
