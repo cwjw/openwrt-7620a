@@ -191,10 +191,23 @@ jobs:
           ls -l "target/linux/ramips/dts/mt7620a_${DEVICE_ID}.dts" \
             || { echo "::error::板级 DTS 未注入源码树"; exit 1; }
 
-          echo "=== 方案C 校验：DTS 里 watchdog 必须是 disabled ==="
+          # K-final 路线：复刻原厂“武装 watchdog + 每 5 秒喂狗”。
+          # 以前这里断言 disabled（方案 C），但方案 C 实测仍在 174.5 s 硬复位，
+          # 已弃用。现在改为断言 okay，否则 /dev/watchdog 根本不存在。
+          echo "=== 复刻原厂校验：DTS 里 &watchdog 必须是 okay ==="
           grep -A3 '&watchdog {' "target/linux/ramips/dts/mt7620a_${DEVICE_ID}.dts" \
-            | grep -q 'disabled' \
-            || { echo "::error::DTS 未禁用 watchdog"; exit 1; }
+            | grep -q 'okay' \
+            || { echo "::error::DTS 里 &watchdog 不是 okay，驱动不会注册 /dev/watchdog"; exit 1; }
+
+          echo "=== 复刻原厂校验：必须持有 fd 喂狗 ==="
+          grep -qF 'exec 3>/dev/watchdog' files/etc/rc.local \
+            || { echo "::error::rc.local 缺少长持有 fd 的喂狗循环"; exit 1; }
+
+          echo "=== 一次性验收：rc.local 必须自带 t165 检查点 / t200 alive ==="
+          grep -qF 'CHECKPOINT t165' files/etc/rc.local \
+            || { echo "::error::rc.local 缺少 t165 检查点"; exit 1; }
+          grep -qF 'ALIVE@200' files/etc/rc.local \
+            || { echo "::error::rc.local 缺少 t200 alive 标记"; exit 1; }
 
           echo "=== 对齐原厂校验：cmdline 必须带 clk_ignore_unused ==="
           grep -q 'clk_ignore_unused' "target/linux/ramips/dts/mt7620a_${DEVICE_ID}.dts" \
@@ -209,7 +222,7 @@ jobs:
           grep -q 'ucidef_add_switch' files/etc/board.d/02_network_sl-ir4 \
             || { echo "::error::02_network_sl-ir4 缺少交换机定义"; exit 1; }
 
-          echo "=== 关键包（LuCI / 4G / 交换机）==="
+          echo "=== 关键包（LuCI / 4G / 交换机） ==="
           grep -E "CONFIG_PACKAGE_(luci|ttyd|htop|uqmi|usb-modeswitch)=" .config | head -20
           grep -E "CONFIG_PACKAGE_(kmod-usb-net-qmi-wwan|kmod-usb-serial-option|swconfig|kmod-rt2800-soc)=" .config
 
