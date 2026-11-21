@@ -1,5 +1,5 @@
 # 构建开关：本文件被修改并 push 到 main，auto.yml 就会自动复调用 build.yml 开始云编译。
 # 以后要重新构建（比如改了 DTS/patch/files/scripts），只需把最后一行改成新的时间戳，不用去 Actions 页面点按钮。
 
-plan: E-rerun  (撤掉 defconfig 后改 .config 的 devmem 改动；所有 make 加 < /dev/null 与 timeout，防止卡死 6 小时)
-build: 2026-11-21T03:25Z  # <- 改这行即触发
+plan: E-ccache  (启用 ccache + 三级缓存 + 并行下载；所有 make 均带 < /dev/null 与 timeout 护栏)
+build: 2026-11-21T03:30Z  # <- 改这行即触发
