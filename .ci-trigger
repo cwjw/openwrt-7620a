@@ -1,5 +1,5 @@
 # 构建开关：本文件被修改并 push 到 main，auto.yml 就会自动复调用 build.yml 开始云编译。
 # 以后要重新构建（比如改了 DTS/patch/files/scripts），只需把最后一行改成新的时间戳，不用去 Actions 页面点按钮。
 
-plan: K-probe  一次刷机拿两个结果：① DEVMEM 真生效，能直读 TMR/RSTSTAT（能读就能当场试关那个计数器）② ramoops 保留死前日志 ③ 每 5 秒把寄存器序列写 /root/hb.txt，复位后读它看计数器数到哪
-build: 2026-11-21T13:27Z  # <- 改这行即触发
+plan: K-probe-r2  内核符号已改到 target/linux/*/config-6.6（三层写肯定值），不靠 openwrt/.config；目标是拿到一个 /dev/mem 真存在的固件
+build: 2026-11-21T13:52Z  # <- 改这行即触发
