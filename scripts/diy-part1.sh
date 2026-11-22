@@ -12,9 +12,9 @@ DTS=target/linux/ramips/dts/mt7620a_7620a_cpe-16m.dts
 
 # ---------------------------------------------------------------------------
 # 差异修正 1：时钟门控。
-# 原厂 3.10.14 SDK 内核里根本没有 common clock framework，所有外设时钟开机后
-# 一直保持开启；而 mainline 6.6 启动末尾会 clk_disable_unused() 把没人持有的
-# 时钟全关掉。先用 clk_ignore_unused 把行为对齐成“一律不关时钟”。
+# 原厂 3.10.14 SDK 内核没有 common clock framework，外设时钟开机后一直开着；
+# mainline 6.6 末尾会 clk_disable_unused() 把没人持有的时钟关掉。
+# 用 clk_ignore_unused 把行为对齐成“一律不关时钟”。
 # ---------------------------------------------------------------------------
 echo "==> 对齐原厂：cmdline 加 clk_ignore_unused"
 if ! grep -q 'clk_ignore_unused' "$DTS"; then
@@ -23,18 +23,25 @@ fi
 grep -q 'clk_ignore_unused' "$DTS" || { echo '!! bootargs 未加上 clk_ignore_unused'; exit 1; }
 
 # ---------------------------------------------------------------------------
-# 看门狗：照抄原厂“武装 + 每5秒喂狗”
-#   ＿主补丁修正 rt2880_wdt 的喂狗逻辑
-#   ＿DTS 的 &watchdog 必须 okay
+# 看门狗 —— 174.4 秒静默复位的真正修复
+#   实机坐实：MT7620 的 TMR1 是从 0 数到 TMR1MAX（复位后默认 0x1A000）的计数器，
+#     0x1A000 * 65536 / 40MHz ≈ 174.42 s，与四次实测死点完全吻合。
+#   主线 ping 只写 TMR1LOAD，在本硬件上不会重装计数器 → 喂狗无效 → 到点硬复位，
+#     且 RSTSTAT 的 WDT_RST_CAUSE 不置位、复位前内核零日志。
+#   修正：ping 改为 关使能 → 写 LOAD → 开使能 的完整重装序列。
 # ---------------------------------------------------------------------------
-echo "==> 注入内核补丁：rt2880_wdt fix-ping"
+echo "==> 注入内核补丁：rt2880_wdt 完整重装序列"
 PATCH_SRC="$ROOT/patches/rt2880-wdt-fix-ping.patch"
 PATCH_DST="target/linux/ramips/patches-6.6/999-rt2880-wdt-fix-ping.patch"
 [ -f "$PATCH_SRC" ] || { echo "!! 找不到 $PATCH_SRC"; exit 1; }
 cp -f "$PATCH_SRC" "$PATCH_DST"
-for k in 'TIMER_TMRSTAT_GAP' 'rt_wdt_stat_w32(drvdata, TMRSTAT_TMR1RST)'; do
+# 关键行必须在，否则说明补丁写坏了（旧版用 TMRSTAT_GAP 标记，已废弃）
+for k in 't & ~TMR1CTL_ENABLE' 'rt_wdt_w32(drvdata->base, TIMER_REG_TMR1CTL, t | TMR1CTL_ENABLE)'; do
 	grep -qF "$k" "$PATCH_DST" || { echo "!! 补丁缺少关键行：$k"; exit 1; }
 done
+if grep -q 'TIMER_TMRSTAT_GAP' "$PATCH_DST"; then
+	echo '!! 补丁里还残留无效的 TMRSTAT_GAP 写法（实测无效，必须删）'; exit 1
+fi
 
 echo "==> 校验：&watchdog 必须为 okay"
 grep -q '&watchdog {' "$DTS" || { echo '!! DTS 中没有 &watchdog 节点'; exit 1; }
@@ -42,14 +49,8 @@ grep -A3 '&watchdog {' "$DTS" | grep -q 'okay' \
 	|| { echo '!! DTS 里 &watchdog 不是 okay'; exit 1; }
 
 # ---------------------------------------------------------------------------
-# 内核仪表（关键修：必须写在“内核配置文件”里，openwrt/.config 里的内核符号会被 defconfig 丢掉）
-#
-# 实测教训（2026-11-21）：把 CONFIG_DEVMEM 写进 configs/mt7620a-16m.config（即 openwrt/.config）后，
-#   make defconfig 直接把它清掉，固件里 devmem 命令在、/dev/mem 却不存在——
-#   几轮“取数”都是空仪表。
-# 所以这里对 generic / ramips / ramips-mt7620 三个内核配置文件全部置为肯定值，
-# 并把 STRICT_DEVMEM 系列统一改成否定行（直接写文件，不靠 defconfig 猜）。
-# ---- 正确做法：这三层文件按 generic → target → subtarget 合并，后者覆盖前者 ----------
+# 内核配置（只能写在 target/linux/.../config-6.6，写完 openwrt/.config 会被 defconfig 丢掉）
+# ---------------------------------------------------------------------------
 KCFGS="target/linux/generic/config-6.6 target/linux/ramips/config-6.6 target/linux/ramips/mt7620/config-6.6"
 set_kopt() {
 	local opt="$1" val="$2" f
@@ -61,35 +62,23 @@ set_kopt() {
 			sed -i -e "s|^# ${opt} is not set|${opt}=${val}|" "$f"
 		fi
 	done
-	# 最后写进 mt7620（优先级最高），确保肯定是最后一条
-echo "${opt}=${val}" >> target/linux/ramips/mt7620/config-6.6
-}
-unset_kopt() {
-	local opt="$1" f
-	for f in $KCFGS; do
-		[ -f "$f" ] || continue
-		sed -i -e "s|^${opt}=.*|# ${opt} is not set|" "$f" 2>/dev/null || true
-	done
-echo "# ${opt} is not set" >> target/linux/ramips/mt7620/config-6.6
+	echo "${opt}=${val}" >> target/linux/ramips/mt7620/config-6.6
 }
 
-echo "==> 内核仪表：DEVMEM / PSTORE / RAMOOPS"
-set_kopt CONFIG_DEVMEM y
-unset_kopt CONFIG_STRICT_DEVMEM
-unset_kopt CONFIG_IO_STRICT_DEVMEM
+echo "==> 内核配置：WATCHDOG_SYSFS / GPIO_SYSFS / PSTORE"
+# WATCHDOG_SYSFS：现场看 /sys/class/watchdog/watchdog0/{state,timeout,bootstatus}
+# 上一版漏了这一项，导致 hb.txt 里 wd_state 全是 No such file。
+set_kopt CONFIG_WATCHDOG_SYSFS y
+set_kopt CONFIG_GPIO_SYSFS y
 set_kopt CONFIG_PSTORE y
 set_kopt CONFIG_PSTORE_RAM y
 set_kopt CONFIG_PSTORE_CONSOLE y
 set_kopt CONFIG_PSTORE_PMSG y
 
-# 自检：肯定行必须存在，且不得残留未置位的 STRICT_DEVMEM
-for opt in CONFIG_DEVMEM CONFIG_PSTORE CONFIG_PSTORE_RAM CONFIG_PSTORE_CONSOLE; do
+# 自检（只校验真正需要的，不再强求 DEVMEM：两轮都没生效，不拖累构建）
+for opt in CONFIG_WATCHDOG_SYSFS CONFIG_PSTORE CONFIG_PSTORE_RAM CONFIG_PSTORE_CONSOLE; do
 	grep -qx "${opt}=y" target/linux/ramips/mt7620/config-6.6 \
 		|| { echo "!! ${opt} 未写入 mt7620 内核配置"; exit 1; }
-done
-for bad in CONFIG_STRICT_DEVMEM CONFIG_IO_STRICT_DEVMEM; do
-	grep -qx "${bad}=y" target/linux/ramips/mt7620/config-6.6 \
-		&& { echo "!! ${bad} 仍为 y"; exit 1; }
 done
 
 # ---------------------------------------------------------------------------
