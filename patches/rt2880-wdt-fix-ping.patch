@@ -1,50 +1,33 @@
-From: cwjw <noreply@github.com>
-Subject: [PATCH] watchdog: rt2880_wdt: 修改 ping 为完整重装序列，真正喂住 TMR1
-
-问题（实机坐实，2026-11-21）：
-  MT7620 的 TMR1 是“从 0 数到 TMR1MAX（复位后默认 0x1A000）”的计数器，
-  0x1A000 * 65536 / 40MHz ≈ 174.42 s。实测四次死点 175.14/172.45/174.46/174.51 s，
-  完全对得上，且 SYSC_RSTSTAT 的 WDT_RST_CAUSE(bit1) 不置位、复位前内核零日志。
-
-  原主线的 ping 只写 TIMER_REG_TMR1LOAD；在本硬件上写 LOAD 并不会重装计数器，
-  所以 procd 每 5 秒一次 WDIOC_KEEPALIVE 完全无效，计数器照样跑到 0x1A000 硬复位。
-  （之前尝试的“脉冲 TMRSTAT.TMR1RST”也无效，已废弃。）
-
-修正：ping 改为 先清除 ENABLE → 重写 LOAD → 再置 ENABLE 的完整重装序列，
-  这正是 rt288x_wdt_stop()/start() 已证明有效的同一套动作。
-  顺便在 probe 打印 TMR1CTL/TMRSTAT/RSTSTAT，便于现场判读。
-
----
 --- a/drivers/watchdog/rt2880_wdt.c
 +++ b/drivers/watchdog/rt2880_wdt.c
-@@ -56,14 +56,30 @@ static inline u32 rt_wdt_r32(void __iomem *base, unsigned int reg)
+@@ -67,8 +67,17 @@
  static int rt288x_wdt_ping(struct watchdog_device *w)
  {
  	struct rt2880_wdt_data *drvdata = watchdog_get_drvdata(w);
 +	u32 t;
  
--	int ret;
 +	/*
-+	 * 必须是完整重装序列：先关使能，再写 LOAD，最后重新使能。
-+	 * 实测只写 TMR1LOAD 不生效（计数器不会从 LOAD 重新开始），
-+	 * 会数到 TMR1MAX=0x1A000 后硬复位（≈174.4 s）。
++	 * Ralink TMR1 是递减计数器：只写 TMR1LOAD 只是改“重装值”，
++	 * 不会重置正在运行的计数器，所以每 5 秒 KEEPALIVE 实际无效。
++	 * 必须 关使能 -> 写 LOAD -> 重新使能，计数器才会从 LOAD 重新开始。
 +	 */
 +	t = rt_wdt_r32(drvdata->base, TIMER_REG_TMR1CTL);
 +	rt_wdt_w32(drvdata->base, TIMER_REG_TMR1CTL, t & ~TMR1CTL_ENABLE);
-+	rt_wdt_w32(drvdata->base, TIMER_REG_TMR1LOAD, w->timeout * drvdata->freq);
+ 	rt_wdt_w32(drvdata->base, TIMER_REG_TMR1LOAD, w->timeout * drvdata->freq);
 +	rt_wdt_w32(drvdata->base, TIMER_REG_TMR1CTL, t | TMR1CTL_ENABLE);
  
  	return 0;
  }
-@@ -162,6 +180,12 @@ static int rt288x_wdt_probe(struct platform_device *pdev)
+@@ -162,6 +171,13 @@
  
  	drvdata->freq = clk_get_rate(drvdata->clk) / RALINK_WDT_PRESCALE;
  
-+	/* 取证：开机时计数器状态、上次复位是否为看门狗所致 */
-+	dev_info(dev, "TMR1CTL=%08x(en=%d) TMRSTAT?=%08x SYSC_RSTSTAT=%08x\n",
++	/* 取证：TMR1CTL 使能位 / TMR1LOAD / 上次复位是否由看门狗造成 */
++	dev_info(dev, "TMR1CTL=%08x(en=%d) TMR1LOAD=%08x RSTSTAT=%08x\n",
 +		 rt_wdt_r32(drvdata->base, TIMER_REG_TMR1CTL),
 +		 !!(rt_wdt_r32(drvdata->base, TIMER_REG_TMR1CTL) & TMR1CTL_ENABLE),
-+		 rt_wdt_r32(drvdata->base, TIMER_REG_TMR1LOAD), rt_sysc_r32(SYSC_RSTSTAT));
++		 rt_wdt_r32(drvdata->base, TIMER_REG_TMR1LOAD),
++		 rt_sysc_r32(SYSC_RSTSTAT));
 +
  	wdt = &drvdata->wdt;
  	wdt->info = &rt288x_wdt_info;
