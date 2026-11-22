@@ -1,76 +1,50 @@
 From: cwjw <noreply@github.com>
-Subject: [PATCH] watchdog: rt2880_wdt: 喂狗时同时脉冲 TMRSTAT.TMR1RST
+Subject: [PATCH] watchdog: rt2880_wdt: 修改 ping 为完整重装序列，真正喂住 TMR1
 
-只写 TMR1LOAD 未必真正重装硬件计数器（TMR1RST 位在驱动里定义了却从未使用），
-再补一拍 TMRSTAT.TMR1RST，并重写一次 ENABLE 位，三条路径任一有效即可喂住。
-顺便在 probe 打印 TMR1CTL / TMRSTAT / SYSC_RSTSTAT，便于判读复位来源。
+问题（实机坐实，2026-11-21）：
+  MT7620 的 TMR1 是“从 0 数到 TMR1MAX（复位后默认 0x1A000）”的计数器，
+  0x1A000 * 65536 / 40MHz ≈ 174.42 s。实测四次死点 175.14/172.45/174.46/174.51 s，
+  完全对得上，且 SYSC_RSTSTAT 的 WDT_RST_CAUSE(bit1) 不置位、复位前内核零日志。
+
+  原主线的 ping 只写 TIMER_REG_TMR1LOAD；在本硬件上写 LOAD 并不会重装计数器，
+  所以 procd 每 5 秒一次 WDIOC_KEEPALIVE 完全无效，计数器照样跑到 0x1A000 硬复位。
+  （之前尝试的“脉冲 TMRSTAT.TMR1RST”也无效，已废弃。）
+
+修正：ping 改为 先清除 ENABLE → 重写 LOAD → 再置 ENABLE 的完整重装序列，
+  这正是 rt288x_wdt_stop()/start() 已证明有效的同一套动作。
+  顺便在 probe 打印 TMR1CTL/TMRSTAT/RSTSTAT，便于现场判读。
 
 ---
 --- a/drivers/watchdog/rt2880_wdt.c
 +++ b/drivers/watchdog/rt2880_wdt.c
-@@ -16,6 +16,7 @@
- #include <linux/moduleparam.h>
- #include <linux/platform_device.h>
- #include <linux/mod_devicetable.h>
-+#include <linux/io.h>
- 
- #include <asm/mach-ralink/ralink_regs.h>
- 
-@@ -28,7 +29,11 @@
- #define TIMER_REG_TMR1LOAD		0x00
- #define TIMER_REG_TMR1CTL		0x08
- 
-+#define TIMER_REG_TMRSTAT		0x00
- #define TMRSTAT_TMR1RST			BIT(5)
-+/* TMRSTAT 是 timer 块的首寄存器(0x100)，本驱动窗口从 0x120 起，相差 0x20；
-+ * palmbus 按页映射，0x100 与 0x120 同页，可用负偏移直接访问。 */
-+#define TIMER_TMRSTAT_GAP		0x20
- 
- #define TMR1CTL_ENABLE			BIT(7)
- #define TMR1CTL_MODE_SHIFT		4
-@@ -64,11 +69,33 @@
- 	return ioread32(base + reg);
- }
- 
-+/* TMRSTAT(0x100) 落在 watchdog 节点(0x120)窗口之外，用同页负偏移访问 */
-+static inline void rt_wdt_stat_w32(struct rt2880_wdt_data *drvdata, u32 val)
-+{
-+	iowrite32(val, drvdata->base - TIMER_TMRSTAT_GAP);
-+}
-+
-+static inline u32 rt_wdt_stat_r32(struct rt2880_wdt_data *drvdata)
-+{
-+	return ioread32(drvdata->base - TIMER_TMRSTAT_GAP);
-+}
-+
+@@ -56,14 +56,30 @@ static inline u32 rt_wdt_r32(void __iomem *base, unsigned int reg)
  static int rt288x_wdt_ping(struct watchdog_device *w)
  {
  	struct rt2880_wdt_data *drvdata = watchdog_get_drvdata(w);
 +	u32 t;
  
- 	rt_wdt_w32(drvdata->base, TIMER_REG_TMR1LOAD, w->timeout * drvdata->freq);
+-	int ret;
 +	/*
-+	 * 只写 TMR1LOAD 未必会真正重装计数器（本文件早就定义了 TMR1RST 位却
-+	 * 从未使用），因此额外向 TMRSTAT 打 TMR1RST；最后再把 ENABLE 位重写
-+	 * 一遍，覆盖“写使能即启动”的实现差异。三条路径任一有效即可喂住。
++	 * 必须是完整重装序列：先关使能，再写 LOAD，最后重新使能。
++	 * 实测只写 TMR1LOAD 不生效（计数器不会从 LOAD 重新开始），
++	 * 会数到 TMR1MAX=0x1A000 后硬复位（≈174.4 s）。
 +	 */
-+	rt_wdt_stat_w32(drvdata, TMRSTAT_TMR1RST);
-+
 +	t = rt_wdt_r32(drvdata->base, TIMER_REG_TMR1CTL);
-+	t |= TMR1CTL_ENABLE;
-+	rt_wdt_w32(drvdata->base, TIMER_REG_TMR1CTL, t);
++	rt_wdt_w32(drvdata->base, TIMER_REG_TMR1CTL, t & ~TMR1CTL_ENABLE);
++	rt_wdt_w32(drvdata->base, TIMER_REG_TMR1LOAD, w->timeout * drvdata->freq);
++	rt_wdt_w32(drvdata->base, TIMER_REG_TMR1CTL, t | TMR1CTL_ENABLE);
  
  	return 0;
  }
-@@ -162,6 +189,12 @@
+@@ -162,6 +180,12 @@ static int rt288x_wdt_probe(struct platform_device *pdev)
  
  	drvdata->freq = clk_get_rate(drvdata->clk) / RALINK_WDT_PRESCALE;
  
-+	/* 取证：开机时计数器是否已被 bootloader 武装、上次复位是否看门狗所致 */
-+	dev_info(dev, "TMR1CTL=%08x(en=%d) TMRSTAT=%08x SYSC_RSTSTAT=%08x\n",
++	/* 取证：开机时计数器状态、上次复位是否为看门狗所致 */
++	dev_info(dev, "TMR1CTL=%08x(en=%d) TMRSTAT?=%08x SYSC_RSTSTAT=%08x\n",
 +		 rt_wdt_r32(drvdata->base, TIMER_REG_TMR1CTL),
 +		 !!(rt_wdt_r32(drvdata->base, TIMER_REG_TMR1CTL) & TMR1CTL_ENABLE),
-+		 rt_wdt_stat_r32(drvdata), rt_sysc_r32(SYSC_RSTSTAT));
++		 rt_wdt_r32(drvdata->base, TIMER_REG_TMR1LOAD), rt_sysc_r32(SYSC_RSTSTAT));
 +
  	wdt = &drvdata->wdt;
  	wdt->info = &rt288x_wdt_info;
