@@ -34,8 +34,16 @@
 		led-upgrade = &led_sys;
 	};
 
+	/*
+	 * 2026-11-22 修正：Breed 引导不传 cmdline，本固件必须自带完整参数。
+	 *   实测原厂 u-boot 传的是：
+	 *     console=ttyS1,57600n8 clk_ignore_unused rootfstype=squashfs,jffs2
+	 *   缺 clk_ignore_unused → CCF 关掉未认领时钟 → MT7620 跑到一半崩；
+	 *   缺 rootfstype        → 内核不知 rootfs 类型 → mount 失败 panic → 约 10 s 重启。
+	 *   不带 root=，让内核从 mtd 自动找 rootfs（mtdsplit 自切）。
+	 */
 	chosen {
-		bootargs = "console=ttyS1,57600n8";
+		bootargs = "console=ttyS1,57600n8 clk_ignore_unused rootfstype=squashfs,jffs2";
 	};
 
 	/*
@@ -211,9 +219,6 @@
  *   若“喂狗无效”则应在 77 秒复位，但实测死点仍是 ~174.5 秒，
  *   且 SYSC_RSTSTAT=c0030000 的 WDT_RST_CAUSE(bit1) 未置位。
  *   → 复位不来自 TMR1 看门狗。
- *
- * 174.4 秒 ≈ 0x1A000 × 65536 / 40MHz，像一个独立计数器数到封顶。
- * 本版保留 okay，并把 TMR 块寄存器序列每 5 秒写进 flash，用来抓那个计数器。
  */
 &watchdog {
 	status = "okay";
