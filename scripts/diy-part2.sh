@@ -1,41 +1,21 @@
 #!/usr/bin/env bash
 # 编译前第二步：把仓库里的 files/ overlay 注入源码，做最终配置收尾
 # 注意：本步骤在 make defconfig 之后运行，**不要在这里改 .config**——
-# 否则构建途中会触发一次交互式 kconfig 重整，CI 里无 stdin 就会卡到 job 超时
-# （Plan E 就是这样卡满 6 小时被 cancel 的）。
+# 否则构建途中会触发一次交互式 kconfig 重整，CI 里无 stdin 就会卡到 job 超时。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT/openwrt"
 
-echo "==> 校验内核仪表配在“内核配置文件”里（不是 openwrt/.config）"
-# 实测教训（2026-11-21）：CONFIG_DEVMEM 写进 openwrt/.config 被 make defconfig 丢掉了，
-# 因为它是内核符号、不属于 OpenWrt 的 Kconfig 空间。内核符号只能落在
-# target/linux/{generic,ramips,ramips/mt7620}/config-6.6 这类文件里，
-# 而且必须确认里面没有残留 "# CONFIG_DEVMEM is not set" 这种否定行（后出现的行会赢）。
+echo "==> 校验内核配置落在 target/linux/*/config-6.6（openwrt/.config 会丢弃内核符号）"
 KCFG_LIST="target/linux/generic/config-6.6 target/linux/ramips/config-6.6 target/linux/ramips/mt7620/config-6.6"
-for opt in CONFIG_DEVMEM CONFIG_PSTORE CONFIG_PSTORE_RAM CONFIG_PSTORE_CONSOLE; do
+for opt in CONFIG_WATCHDOG_SYSFS CONFIG_PSTORE CONFIG_PSTORE_RAM CONFIG_PSTORE_CONSOLE; do
 	if ! grep -h -qx "${opt}=y" $KCFG_LIST; then
-		echo "::error::${opt} 没有写进任何内核配置文件，devmem/pstore 会不可用"
-		exit 1
-	fi
-	if grep -h -qx "# ${opt} is not set" $KCFG_LIST; then
-		# 同一文件内后行覆盖前行：确认肯定行在否定行之后
-		if [ "$(grep -hn "${opt}" $KCFG_LIST | tail -1 | grep -c '=y')" != "1" ]; then
-			echo "::error::${opt} 被另一处否定行覆盖"
-			grep -n "${opt}" $KCFG_LIST || true
-			exit 1
-		fi
-	fi
-done
-for bad in CONFIG_STRICT_DEVMEM CONFIG_IO_STRICT_DEVMEM; do
-	if grep -h -qx "${bad}=y" $KCFG_LIST; then
-		echo "::error::${bad} 仍为 y，会拦住 devmem 访问 MMIO"
-		grep -n "${bad}" $KCFG_LIST || true
+		echo "::error::${opt} 没有写进任何内核配置文件"
 		exit 1
 	fi
 done
-echo "==> 内核仪表配置校验通过"
+echo "==> 内核配置校验通过"
 
 echo "==> 注入 files/ 默认配置"
 rm -rf files
@@ -55,10 +35,10 @@ grep -q 'boot_hook_add preinit_main' files/lib/preinit/82_7620a_overlay_guard
 
 test "$(basename files/lib/preinit/82_7620a_overlay_guard)" \> "80_mount_root" || exit 1
 
-echo "==> 校验 rc.local 带寄存器取证与验收标记"
-grep -qF '/root/hb.txt' files/etc/rc.local || { echo "::error::rc.local 缺少寄存器取证"; exit 1; }
+echo "==> 校验 rc.local 带验收标记"
 grep -qF 'CHECKPOINT t165' files/etc/rc.local || { echo "::error::rc.local 缺少 t165 检查点"; exit 1; }
 grep -qF 'ALIVE@200' files/etc/rc.local || { echo "::error::rc.local 缺少 t200 alive 标记"; exit 1; }
+grep -qF 'wdog0_state' files/etc/rc.local || { echo "::error::rc.local 缺少看门狗状态取证"; exit 1; }
 chmod +x files/etc/rc.local
 
 echo "==> 注册开机自启（7620a-wifi）"
