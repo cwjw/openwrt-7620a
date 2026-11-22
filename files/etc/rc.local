@@ -6,9 +6,11 @@
 #     GPIO33      : 原厂 vpn.sh/ipsec.sh 用它，本版并入无线状态
 #     GPIO31 4G   : 按 EC20 枚举（实测本固件下 EC20 未枚举）
 #
-# 二、看门狗状态取证：/dev/watchdog 被 procd(pid1) 持有，用户态 open 必定 EBUSY，
-#     所以不抢 fd，只把 sysfs 里的 state/timeout/bootstatus 每 5 秒写进 /root/hb.txt。
-#     本版已修复驱动 ping（完整重装序列），存活判据就是 hb.txt 一直写、accept 出 ALIVE@200。
+# 二、看门狗：原厂 /etc/init.d/done 用的是
+#         exec 3>/dev/watchdog  （长持有 fd）+ watchdog -T ... -s 5
+#     但本固件实测 /dev/watchdog 已被 procd(pid1) 持有，用户态再 open 必定 EBUSY，
+#     抢不到 fd。因此本版不抢，改为：内核驱动侧修好 ping（完整重装序列），
+#     用户态只负责把 sysfs 状态写 flash，发现异常可回溯。
 #
 # 三、验收：t165 写检查点，t200 追加 alive。
 #
