@@ -1,20 +1,16 @@
 #!/bin/sh
 #
-# 一次性做全版：复刻原厂行为 + 死因取证，两者共用一次刷机。
-#
 # 一、面板灯（照原厂 /etc/diag.sh + /etc/status/*.sh，脚本点灯，不用内核 trigger）
 #     GPIO32 SYS  : done → sealed 32 "slow"   ⇒ 慢闪
 #     GPIO30 LINK : eth_led.sh → 任一网口 link up ⇒ on
-#     GPIO33      : 原厂 vpn.sh/ipsec.sh 用它，本版并入无线状态，任一为真就亮
-#     GPIO31 4G   : 按 EC20 枚举（实测本固件下 EC20 根本未枚举，所以不会亮）
+#     GPIO33      : 原厂 vpn.sh/ipsec.sh 用它，本版并入无线状态
+#     GPIO31 4G   : 按 EC20 枚举（实测本固件下 EC20 未枚举）
 #
-# 二、看门狗：实测 /dev/watchdog 被 procd(pid1) 持有，用户态 open 返回 EBUSY，
-#     所以这里不再抢 fd（抢也抢不到），只把 EBUSY / 超时 / state 记下来备查。
+# 二、看门狗状态取证：/dev/watchdog 被 procd(pid1) 持有，用户态 open 必定 EBUSY，
+#     所以不抢 fd，只把 sysfs 里的 state/timeout/bootstatus 每 5 秒写进 /root/hb.txt。
+#     本版已修复驱动 ping（完整重装序列），存活判据就是 hb.txt 一直写、accept 出 ALIVE@200。
 #
-# 三、死因取证（写在 flash，不需抢窗口）：
-#     /root/hb.txt  每 5 秒覆盖写：uptime + TMR0/TMR1/TMRSTAT/RSTSTAT 寄存器
-#                   复位后读它，就能看到复位前一瞬间计数器数到哪里。
-#     /root/accept.txt  t165 写检查点，t200 追加 alive，一眼判定有没有解决。
+# 三、验收：t165 写检查点，t200 追加 alive。
 #
 
 L=/sys/class/leds
@@ -23,6 +19,7 @@ LNKB=$L/link/brightness
 WIFB=$L/green:wlan/brightness
 WIFT=$L/green:wlan/trigger
 FF4B=$L/4g/brightness
+W=/sys/class/watchdog/watchdog0
 
 for t in $L/link/trigger $WIFT; do [ -w "$t" ] && echo none > "$t" 2>/dev/null; done
 
@@ -57,35 +54,21 @@ for t in $L/link/trigger $WIFT; do [ -w "$t" ] && echo none > "$t" 2>/dev/null; 
 	done
 ) >/dev/null 2>&1 &
 
-# ---------- 二、看门狗现状取证（不抢 fd） ----------
+# ---------- 二、存活心跳 + 看门狗状态（写 flash，复位后能读） ----------
 (
-	W=/sys/class/watchdog/watchdog0
-	ldr=$(ls -l /proc/1/fd 2>/dev/null | grep -c watchdog)
-	echo "procd_fd_on_wd=$ldr tmo=$(cat $W/timeout 2>/dev/null) max=$(cat $W/max_timeout 2>/dev/null) state=$(cat $W/state 2>/dev/null) bootstatus=$(cat $W/bootstatus 2>/dev/null)" > /tmp/wdog.log
-	exec 3>/dev/watchdog 2>/tmp/wdog_open.err
-	if [ $? -eq 0 ]; then echo "open OK" >> /tmp/wdog.log; else echo "open FAIL: $(cat /tmp/wdog_open.err 2>/dev/null)" >> /tmp/wdog.log; fi
-) >/dev/null 2>&1 &
-
-# ---------- 三、死因取证：寄存器序列写 flash ----------
-(
-	i=0
 	while :; do
-		i=$((i+1))
 		up=$(cut -d' ' -f1 /proc/uptime)
 		{
-			echo "# n=$i up=$up load=$(cut -d' ' -f1-3 /proc/loadavg)"
-			echo "rststat=$(devmem 0x10000038 32 2>&1)"
-			echo "tmrstat=$(devmem 0x10000100 32 2>&1)"
-			echo "tmr0load=$(devmem 0x10000110 32 2>&1) tmr0ctl=$(devmem 0x10000118 32 2>&1)"
-			echo "tmr1load=$(devmem 0x10000120 32 2>&1) tmr1ctl=$(devmem 0x10000128 32 2>&1)"
-			echo "wd_state=$(cat /sys/class/watchdog/watchdog0/state 2>&1) wd_tmo=$(cat /sys/class/watchdog/watchdog0/timeout 2>&1)"
+			echo "up=$up load=$(cut -d' ' -f1-3 /proc/loadavg)"
+			echo "wdog0_state=$(cat $W/state 2>&1) wdog0_tmo=$(cat $W/timeout 2>&1) wdog0_max=$(cat $W/max_timeout 2>&1) wdog0_bootstatus=$(cat $W/bootstatus 2>&1)"
+			echo "led: sys=$(cat $SYSB 2>/dev/null) link=$(cat $LNKB 2>/dev/null) wifi=$(cat $WIFB 2>/dev/null) 4g=$(cat $FF4B 2>/dev/null)"
 		} > /root/hb.txt 2>&1
 		sync
 		sleep 5
 	done
 ) >/dev/null 2>&1 &
 
-# ---------- 四、验收：t165 检查点 / t200 alive ----------
+# ---------- 三、验收 ----------
 AC=/root/accept.txt
 (
 	while :; do
@@ -97,19 +80,15 @@ AC=/root/accept.txt
 				echo "===== CHECKPOINT t165 ====="
 				echo "uptime=$up"
 				echo "cmdline=$(cat /proc/cmdline)"
-				echo "devmem=$(command -v devmem >/dev/null 2>&1 && echo yes || echo no) devmem_node=$([ -c /dev/mem ] && echo yes || echo no)"
-				echo "wdog_node=$([ -e /dev/watchdog ] && echo yes || echo no)"
-				echo "wdog: $(tr '\n' '|' < /tmp/wdog.log 2>/dev/null)"
+				echo "wdog: state=$(cat $W/state 2>&1) tmo=$(cat $W/timeout 2>&1) bootstatus=$(cat $W/bootstatus 2>&1)"
 				echo "led: sys=$(cat $SYSB 2>/dev/null) link=$(cat $LNKB 2>/dev/null) wifi=$(cat $WIFB 2>/dev/null) 4g=$(cat $FF4B 2>/dev/null)"
-				echo "pstore=$(ls /sys/fs/pstore/ 2>&1 | tr '\n' ' ')"
 				echo "mtd:"; cat /proc/mtd
 			} > $AC 2>&1
 			sync; touch /tmp/.ck165
-			cp -f /root/hb.txt /root/hb165.txt 2>/dev/null; sync
 		fi
 		if [ "$up" -ge 200 ] && [ ! -f /tmp/.ck200 ]; then
 			echo "===== ALIVE@200 uptime=$up =====" >> $AC
-			echo "固定 174.5 秒死点已越过" >> $AC
+			echo "174.4 秒固定死点已越过" >> $AC
 			sync; touch /tmp/.ck200
 		fi
 		sleep 3
