@@ -1,5 +1,5 @@
 # 构建开关：本文件被修改并 push 到 main，auto.yml 就会自动复调用 build.yml 开始云编译。
 # 以后要重新构建（比如改了 DTS/patch/files/scripts），只需把最后一行改成新的时间戳，不用去 Actions 页面点按钮。
 
-plan: K-fix  修驱动 ping：关使能→写LOAD→开使能 的完整重装序列，对齐 TMR1MAX 0x1A000×65536/40MHz=174.4s 死点
-build: 2026-11-22T04:02Z  # <- 改这行即触发
+plan: K-fix-r2  补丁用 v6.6.159 真实源码重生成（修正 malformed patch），内容仍为 ping 完整重装序列
+build: 2026-11-22T09:18Z  # <- 改这行即触发
