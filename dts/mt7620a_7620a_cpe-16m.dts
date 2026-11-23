@@ -11,7 +11,7 @@
 // 实测确认的板级参数：
 //   分区：u-boot 0x00000 +0x30000 / u-boot-env 0x30000 +0x10000 / factory 0x40000 +0x10000
 //         firmware 0x50000 +0xAC0000
-//   内核 cmdline：console=ttyS1,57600n8
+//   内核 cmdline：console=ttyS0,115200
 //   网口：lan_port=0、wan_port=4 → mediatek,portmap = "llllw"
 //   灯：GPIO30=LINK  GPIO31=4G  GPIO32=SYS  GPIO33=WIFI
 //   按键：reset GPIO35
@@ -35,15 +35,22 @@
 	};
 
 	/*
-	 * 2026-11-22 修正：Breed 引导不传 cmdline，本固件必须自带完整参数。
-	 *   实测原厂 u-boot 传的是：
-	 *     console=ttyS1,57600n8 clk_ignore_unused rootfstype=squashfs,jffs2
-	 *   缺 clk_ignore_unused → CCF 关掉未认领时钟 → MT7620 跑到一半崩；
-	 *   缺 rootfstype        → 内核不知 rootfs 类型 → mount 失败 panic → 约 10 s 重启。
+	 * 2026-11-23 修正：启动慢 150 秒的根因就在这里。
+	 *
+	 *   旧值 console=ttyS1,57600n8 是照抄原厂 3.10 SDK 的；但本 DTS 只启用了
+	 *   &uart（uart@500 → ttyS0），根本没有注册 ttyS1 这个 console 实例。
+	 *   内核启动期要打上万行 printk，每行都往不存在的 console 写，每次都要等
+	 *   UART 状态位超时，日志本身就能把开机拖到 150 秒量级；再叠上旧版缺
+	 *   clk_ignore_unused（CCF 把没人认领的 UART 时钟关掉），写 console 更要
+	 *   一路等到超时。
+	 *
+	 *   首版（11-17）用的是 console=ttyS0,115200，实测启动很快 —— 这是唯一
+	 *   有实证支持的最快配置，所以回到它，并把 clk_ignore_unused 保留。
+	 *   rootfstype 保留，避免内核在 mtd 上反复试探 rootfs 类型。
 	 *   不带 root=，让内核从 mtd 自动找 rootfs（mtdsplit 自切）。
 	 */
 	chosen {
-		bootargs = "console=ttyS1,57600n8 clk_ignore_unused rootfstype=squashfs,jffs2";
+		bootargs = "console=ttyS0,115200 clk_ignore_unused rootfstype=squashfs,jffs2";
 	};
 
 	/*
@@ -115,7 +122,7 @@
 	status = "okay";
 };
 
-/* 板载 RS232（ADM3202）；原厂内核即 console=ttyS1,57600n8 */
+/* 板载 RS232（ADM3202）；mainline 下 uart@500 注册为 ttyS0，console 就用它 */
 &uart {
 	status = "okay";
 };
@@ -213,12 +220,10 @@
 /*
  * 硬件看门狗：保持 okay，由 procd 句柄持有。
  *
- * 实测结论（2026-11-21）：
- *   /dev/watchdog 被 procd(pid 1) 持有，用户态再 open 返回 EBUSY；
- *   /sys/class/watchdog/watchdog0 = timeout 30 / max 107 / state active；
- *   若“喂狗无效”则应在 77 秒复位，但实测死点仍是 ~174.5 秒，
- *   且 SYSC_RSTSTAT=c0030000 的 WDT_RST_CAUSE(bit1) 未置位。
- *   → 复位不来自 TMR1 看门狗。
+ * TMR1 计数链（已核算）：复位默认值 0x1A000 = 106496，时钟 40MHz/65536 = 610.35Hz，
+ * 106496 ÷ 610.35 = 174.48 秒。驱动 probe 写入 timeout=30 的 TMR1LOAD(18310)，
+ * 但只写 LOAD 不会重装正在跑的计数器 → 仍按 106496 数到 0 → 174.48 秒硬复位。
+ * 补丁把 ping 改成 关使能→写 LOAD→开使能，计数器才真正重装。
  */
 &watchdog {
 	status = "okay";
