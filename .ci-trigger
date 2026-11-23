@@ -1,5 +1,5 @@
 # 构建开关：本文件被修改并 push 到 main，auto.yml 就会自动复调用 build.yml 开始云编译。
 # 以后要重新构建（比如改了 DTS/patch/files/scripts），只需把最后一行改成新的时间戳，不用去 Actions 页面点按钮。
 
-plan: K-fix-r4  patch 结构已自校验通过（hunk -67,8/+67,17 与 -162,6/+171,13 均一致），重新触发云端整包构建
-build: 2026-11-23T01:31Z  # <- 改这行即触发
+plan: K-fix-r5  解决启动慢：console 由未注册的 ttyS1 改回 ttyS0,115200（首版实证最快），保留 clk_ignore_unused + rootfstype；看门狗 TMR1 重装补丁仍生效
+build: 2026-11-23T01:39Z  # <- 改这行即触发
