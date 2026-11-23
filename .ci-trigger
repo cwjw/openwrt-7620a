@@ -1,5 +1,5 @@
 # 构建开关：本文件被修改并 push 到 main，auto.yml 就会自动复调用 build.yml 开始云编译。
 # 以后要重新构建（比如改了 DTS/patch/files/scripts），只需把最后一行改成新的时间戳，不用去 Actions 页面点按钮。
 
-plan: K-fix-r3  DTS 自带完整 cmdline（clk_ignore_unused + rootfstype=squashfs,jffs2），Breed 引导不再依赖 u-boot 传参；patch 仍为 v6.6.159 真实源码生成的 ping 重装序列
-build: 2026-11-22T15:56Z  # <- 改这行即触发
+plan: K-fix-r4  patch 结构已自校验通过（hunk -67,8/+67,17 与 -162,6/+171,13 均一致），重新触发云端整包构建
+build: 2026-11-23T01:31Z  # <- 改这行即触发
