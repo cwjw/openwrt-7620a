@@ -11,7 +11,7 @@
 // 实测确认的板级参数：
 //   分区：u-boot 0x00000 +0x30000 / u-boot-env 0x30000 +0x10000 / factory 0x40000 +0x10000
 //         firmware 0x50000 +0xAC0000
-//   内核 cmdline：console=ttyS0,115200
+//   内核 cmdline：console=ttyS0,57600n8（与原厂 u-boot 同速率，串口工具无需切波特率）
 //   网口：lan_port=0、wan_port=4 → mediatek,portmap = "llllw"
 //   灯：GPIO30=LINK  GPIO31=4G  GPIO32=SYS  GPIO33=WIFI
 //   按键：reset GPIO35
@@ -44,13 +44,14 @@
 	 *   clk_ignore_unused（CCF 把没人认领的 UART 时钟关掉），写 console 更要
 	 *   一路等到超时。
 	 *
-	 *   首版（11-17）用的是 console=ttyS0,115200，实测启动很快 —— 这是唯一
-	 *   有实证支持的最快配置，所以回到它，并把 clk_ignore_unused 保留。
+	 *   改用 ttyS0（mainline 下 uart@500 的真实注册名），波特率取 57600n8，
+	 *   与原厂 u-boot 一致，串口工具一个速率到底。
+	 *   clk_ignore_unused 保留，防 CCF 回收 UART 时钟。
 	 *   rootfstype 保留，避免内核在 mtd 上反复试探 rootfs 类型。
 	 *   不带 root=，让内核从 mtd 自动找 rootfs（mtdsplit 自切）。
 	 */
 	chosen {
-		bootargs = "console=ttyS0,115200 clk_ignore_unused rootfstype=squashfs,jffs2";
+		bootargs = "console=ttyS0,57600n8 clk_ignore_unused rootfstype=squashfs,jffs2";
 	};
 
 	/*
